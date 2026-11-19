@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node tests/login.mjs && node tests/sync.mjs && node tests/format.mjs && node tests/recovery.mjs && node tests/drafts.mjs",
+    "test": "node tests/login.mjs && node tests/sync.mjs && node tests/format.mjs && node tests/recovery.mjs && node tests/drafts.mjs && node tests/password-change.mjs && node tests/key-refresh.mjs",
     "test:webkit": "FORMAT_BROWSER=webkit node tests/format.mjs"
   },
   "devDependencies": {

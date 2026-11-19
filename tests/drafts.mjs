@@ -17,7 +17,10 @@ export const signInWithEmailAndPassword=async(a,email,password)=>{if(password!==
 export const signOut=async()=>{auth.currentUser=null;localStorage.removeItem('mock-auth')};
 export const ref=(db,path)=>path;
 const value=()=>JSON.parse(localStorage.getItem('mock-cloud')||'null');
-export const get=async()=>({val:value});
+export const get=async path=>({val:()=>path.includes('/keyWraps/')?JSON.parse(localStorage.getItem('mock-wrap:'+path)||'null'):value()});
+export const set=async(path,payload)=>localStorage.setItem('mock-wrap:'+path,JSON.stringify(payload));
+export const remove=async path=>localStorage.removeItem('mock-wrap:'+path);
+export const updatePassword=async(user,password)=>localStorage.setItem('mock-valid-pass',password);
 export const onValue=(path,fn)=>{queueMicrotask(()=>fn({val:()=>path==='.info/connected'?true:value()}));return ()=>{}};
 export const runTransaction=async(path,update)=>{const result=update(value());if(result!==undefined)localStorage.setItem('mock-cloud',JSON.stringify(result));return {committed:result!==undefined,snapshot:{val:value}}};
 `}));

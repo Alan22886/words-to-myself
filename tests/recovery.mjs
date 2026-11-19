@@ -17,7 +17,10 @@ export const signInWithEmailAndPassword=async(a,email,password)=>{if(password!==
 export const signOut=async()=>{auth.currentUser=null;localStorage.removeItem('mock-auth')};
 export const ref=(db,path)=>path;
 const value=()=>JSON.parse(localStorage.getItem('mock-cloud')||'null');
-export const get=async()=>({val:value});
+export const get=async path=>({val:()=>path.includes('/keyWraps/')?JSON.parse(localStorage.getItem('mock-wrap:'+path)||'null'):value()});
+export const set=async(path,payload)=>localStorage.setItem('mock-wrap:'+path,JSON.stringify(payload));
+export const remove=async path=>localStorage.removeItem('mock-wrap:'+path);
+export const updatePassword=async(user,password)=>localStorage.setItem('mock-valid-pass',password);
 export const onValue=(path,fn)=>{queueMicrotask(()=>fn({val:()=>path==='.info/connected'?true:value()}));return ()=>{}};
 export const runTransaction=async(path,update)=>{const result=update(value());if(result!==undefined)localStorage.setItem('mock-cloud',JSON.stringify(result));return {committed:result!==undefined,snapshot:{val:value}}};
 `}));
@@ -45,11 +48,11 @@ assert.equal(await page.evaluate(()=>localStorage.getItem('mock-cloud')),before)
 await page.locator('#recoveryPassword').fill('wrong-old-password');await page.locator('#login').click();await page.getByRole('alert').filter({hasText:'原加密密码不正确'}).waitFor();
 assert.equal(await page.evaluate(()=>localStorage.getItem('mock-cloud')),before);
 await page.locator('#recoveryPassword').fill('test-password');await page.locator('#login').click();await page.locator('#edit').waitFor();
-assert.notEqual(await page.evaluate(()=>localStorage.getItem('mock-cloud')),before);
+assert.equal(await page.evaluate(()=>localStorage.getItem('mock-cloud')),before); // key wrapping does not rewrite content
 for(const [index,text] of [[0,'只有当前一页'],[1,'retained 1'],[2,'retained 2']]){await page.locator(`[data-page="${index}"]`).click();await page.waitForFunction(text=>document.querySelector('#reading').textContent.includes(text),text);}
 assert.equal(await page.locator('#recoveryPassword').inputValue(),'');
 page.once('dialog',dialog=>dialog.accept());await page.locator('#date').click();await page.locator('#loginForm').waitFor();
 await page.locator('#password').fill('new-test-password');await page.locator('#login').click();await page.locator('#edit').waitFor();assert.ok(await page.locator('#recoveryField').isHidden());
 await page.locator('[data-page="2"]').click();await page.waitForFunction(()=>document.querySelector('#reading').textContent.includes('retained 2'));
-console.log('PASS: reset-password recovery; wrong original password leaves cloud untouched; three pages retained; re-encryption; new-password-only re-login; recovery password cleared');
+console.log('PASS: reset-password recovery; wrong original password leaves cloud untouched; three pages retained; password-protected key wrapping; new-password-only re-login; recovery password cleared');
 } finally { await browser.close(); }

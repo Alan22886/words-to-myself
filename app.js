@@ -175,6 +175,35 @@ async function connect() {
   await api.setPersistence(auth,api.browserLocalPersistence);
   await auth.authStateReady();
 }
+async function wrappingId(passwordKey){
+  const raw=await crypto.subtle.exportKey('raw',passwordKey);
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256',raw))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function unlockContent(payload,passwordKey,uid){
+  if(!payload)return {key:passwordKey,doc:{pages:[emptyPage(),emptyPage(),emptyPage()]}};
+  try{return {key:passwordKey,doc:await decrypt(payload,passwordKey)};}catch(error){if(error.name!=='OperationError')throw error;}
+  const box=(await api.get(api.ref(database,'pages/'+uid+'/keyWraps/'+await wrappingId(passwordKey)))).val();
+  if(box){
+    const raw=await decryptRaw(box,passwordKey);
+    if(raw.kind!=='data-key'||typeof raw.key!=='string')throw Error('密钥格式不正确');
+    const dataKey=await crypto.subtle.importKey('raw',bytes(raw.key),'AES-GCM',true,['encrypt','decrypt']);
+    return {key:dataKey,doc:await decrypt(payload,dataKey)};
+  }
+  throw new DOMException('The encryption key does not match.','OperationError');
+}
+async function savePasswordWrap(passwordKey,dataKey,uid){
+  const id=await wrappingId(passwordKey),target=api.ref(database,'pages/'+uid+'/keyWraps/'+id);
+  const raw=b64(new Uint8Array(await crypto.subtle.exportKey('raw',dataKey)));
+  await api.set(target,await encrypt({kind:'data-key',key:raw},passwordKey));return id;
+}
+function handleSyncFailure(error){
+  received=false;status('同步失败');
+  if(error.name==='OperationError'||error.code==='PERMISSION_DENIED'||error.code==='permission-denied'){
+    unsubscribe?.();unsubscribe=null;rememberCurrentDraft();flushDraftCache();
+    showLogin();tell(error.name==='OperationError'?'此设备的密钥已过期。请用当前登录密码重新登录，缓存和草稿已保留；需要恢复时只填写一次原加密密码。':'登录权限已失效，请重新登录；本机缓存和草稿已保留，无需修改数据库规则。');
+  }else if(error.code==='PERMISSION_DENIED'||error.code==='permission-denied')tell('登录权限已失效，请重新登录；无需修改公开读写规则。');
+  else tell('同步失败：'+(error.message||'请检查网络连接。'));
+}
 function syncStatus() {
   if(busy)status('同步中');
   else if(!connected)status('离线');
@@ -206,8 +235,8 @@ async function listen(user) {
   ref=api.ref(database,'pages/'+user.uid+'/current');
   const stopPage=api.onValue(ref,snapshot=>{
     const value=snapshot.val();
-    remoteQueue=remoteQueue.then(()=>acceptRemote(value)).catch(error=>tell('同步失败：'+error.message));
-  },error=>{received=false;status('同步失败');tell('请检查网络或数据库规则。');});
+    remoteQueue=remoteQueue.then(()=>acceptRemote(value)).catch(handleSyncFailure);
+  },handleSyncFailure);
   const stopConnection=api.onValue(api.ref(database,'.info/connected'),snapshot=>{connected=!!snapshot.val();syncStatus();});
   unsubscribe=()=>{stopPage();stopConnection();};
 }
@@ -279,7 +308,7 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
   finally{
     busy=false;$('save').disabled=false;$('edit').disabled=false;syncStatus();renderTabs();
     if(received&&cipherToken(latest)!==revision&&!editing){
-      const pending=latest;remoteQueue=remoteQueue.then(()=>acceptRemote(pending)).catch(error=>tell('同步失败：'+error.message));
+      const pending=latest;remoteQueue=remoteQueue.then(()=>acceptRemote(pending)).catch(handleSyncFailure);
     }
   }
 }
@@ -335,13 +364,14 @@ $('image').onchange=async event=>{
 };
 window.addEventListener('beforeunload',event=>{if((editing&&contentChanged(draft(),doc))||drafts.size){event.preventDefault();event.returnValue='';}});
 function showLogin() {
-  $('date').disabled=true;$('date').textContent='未登录';
+  $('date').disabled=true;$('accountSettings').disabled=true;$('date').textContent='未登录';
   $('loginForm').hidden=false;$('page').hidden=true;
   $('email').value=session?.email||'';
 }
-function showPage() {$('date').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;}
+function showPage() {$('date').disabled=false;$('accountSettings').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;}
 $('loginForm').onsubmit=async event=>{
   event.preventDefault();$('login').disabled=true;tell('');
+  rememberCurrentDraft();await flushDraftCache();
   const previous=session, previousKey=key;
   unsubscribe?.();unsubscribe=null;
   let migrated=false,draftRecoveryKey=previousKey;
@@ -349,39 +379,33 @@ $('loginForm').onsubmit=async event=>{
     session={config:firebaseConfig,email:$('email').value.trim()};
     await connect();
     const credential=await api.signInWithEmailAndPassword(auth,session.email,$('password').value);
-    key=await derive($('password').value,credential.user.uid);
+    const passwordKey=await derive($('password').value,credential.user.uid);key=passwordKey;
     const target=api.ref(database,'pages/'+credential.user.uid+'/current');
     let payload=(await api.get(target)).val(),cloudDoc;
-    try{cloudDoc=payload?await decrypt(payload):{pages:[emptyPage(),emptyPage(),emptyPage()]};}
+    try{const unlocked=await unlockContent(payload,passwordKey,credential.user.uid);key=unlocked.key;cloudDoc=unlocked.doc;}
     catch(error){
       if(error.name!=='OperationError')throw error;
       let recoveryKey,recovered;
       if(previousKey){try{recovered=await decrypt(payload,previousKey);recoveryKey=previousKey;}catch{}}
       if(!recovered&&$('recoveryPassword').value){
         recoveryKey=await derive($('recoveryPassword').value,credential.user.uid);
-        try{recovered=await decrypt(payload,recoveryKey);}catch{throw Object.assign(Error('原加密密码不正确，请核对重置前的密码。'),{code:'recovery/incorrect'});}
+        try{const unlocked=await unlockContent(payload,recoveryKey,credential.user.uid);recoveryKey=unlocked.key;recovered=unlocked.doc;}catch{throw Object.assign(Error('原加密密码不正确，请核对重置前的密码。'),{code:'recovery/incorrect'});}
       }
       if(!recovered){
         $('recoveryField').hidden=false;$('recoveryPassword').required=true;
         throw Object.assign(Error('登录密码已验证。请填写重置前的原加密密码以恢复内容。'),{code:'recovery/required'});
       }
-      draftRecoveryKey=recoveryKey;
-      for(let attempt=0;attempt<3;attempt++){
-        if(!payload){cloudDoc={pages:[emptyPage(),emptyPage(),emptyPage()]};break;}
-        const restored=await decrypt(payload,recoveryKey),replacement=await encrypt(restored,key),expected=cipherToken(payload);
-        const result=await api.runTransaction(target,current=>cipherToken(current)===expected?replacement:undefined,{applyLocally:false});
-        if(result.committed){payload=replacement;cloudDoc=restored;migrated=true;break;}
-        payload=result.snapshot.val();
-        try{cloudDoc=payload?await decrypt(payload):{pages:[emptyPage(),emptyPage(),emptyPage()]};break;}catch{}
-      }
-      if(!cloudDoc)throw Error('其他设备正在更新，请稍后再次恢复。');
+      draftRecoveryKey=recoveryKey;key=recoveryKey;cloudDoc=recovered;
+      session.wrapId=await savePasswordWrap(passwordKey,key,credential.user.uid);migrated=true;
+
     }
     if((doc.title||doc.html) && !previous?.key && !confirm('登录后显示云端内容，本机内容将替换。继续？')) {
       await api.signOut(auth);session=previous;key=previousKey;return;
     }
+    session.wrapId=await wrappingId(passwordKey);
     session.key=b64(new Uint8Array(await crypto.subtle.exportKey('raw',key)));
-    session.payload=payload;await persist(session);installBook(cloudDoc);await restoreDraftCache(draftRecoveryKey);if(migrated)await flushDraftCache();revision=cipherToken(payload);
-    $('password').value='';$('recoveryPassword').value='';$('recoveryPassword').required=false;$('recoveryField').hidden=true;render();showPage();await listen(credential.user);if(migrated)tell('内容已恢复并用新密码重新加密。其他设备请退出后用新密码登录。');
+    session.payload=payload;await persist(session);installBook(cloudDoc);await restoreDraftCache(draftRecoveryKey);await flushDraftCache();revision=cipherToken(payload);
+    $('password').value='';$('recoveryPassword').value='';$('recoveryPassword').required=false;$('recoveryField').hidden=true;render();showPage();await listen(credential.user);if(migrated)tell('内容已恢复。以后只需当前密码登录，不用再填原加密密码。');
   }catch(error){
     session=previous;key=previousKey;
     const messages={
@@ -390,7 +414,7 @@ $('loginForm').onsubmit=async event=>{
       'auth/too-many-requests':'尝试过多，请稍后重试。',
       'auth/network-request-failed':'网络连接失败，请重试。',
       'auth/invalid-api-key':'Firebase 配置有误，请核对 API Key。',
-      'PERMISSION_DENIED':'请先发布数据库访问规则。'
+      'PERMISSION_DENIED':'数据库未授权本次请求，请重新登录后重试。'
     };
     tell(messages[error.code] || (error.code?.startsWith('recovery/')?error.message:(error.name==='OperationError'?'无法解密，请检查原加密密码。':'登录失败：'+error.message)));
   }finally{$('login').disabled=false;}
@@ -421,7 +445,7 @@ if('serviceWorker'in navigator){
   let refreshing=false;const controlledOnLoad=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
     if(!controlledOnLoad)return;
-    if(editing||drafts.size||busy||!$('loginForm').hidden||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
+    if(editing||drafts.size||busy||!$('loginForm').hidden||$('passwordDialog').open||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
     if(!refreshing){refreshing=true;location.reload();}
   });
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(registration=>{
@@ -581,7 +605,44 @@ document.addEventListener('touchmove',event=>{
 
 $('clearTitle').onclick=()=>{$('title').value='';rememberCurrentDraft();scheduleDraftCache();};
 
-document.addEventListener('selectionchange',()=>{if(pendingReload&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
+document.addEventListener('selectionchange',()=>{if(pendingReload&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&!$('passwordDialog').open&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
 
 $('addTodo').addEventListener('click',()=>{rememberCurrentDraft();scheduleDraftCache();});
 $('editor').addEventListener('keydown',event=>{if(['Enter','Backspace'].includes(event.key))queueMicrotask(()=>{rememberCurrentDraft();scheduleDraftCache();});});
+
+$('accountSettings').onclick=()=>{
+  if(!session?.key||!auth?.currentUser){tell('请先登录。');return;}
+  if(busy)return;
+  $('passwordChangeForm').reset();$('currentPasswordField').hidden=true;$('currentPassword').required=false;$('passwordChangeNotice').textContent='';$('passwordDialog').showModal();
+};
+$('closePasswordDialog').onclick=()=>{if(!$('changePassword').disabled)$('passwordDialog').close();};
+$('passwordChangeForm').onsubmit=async event=>{
+  event.preventDefault();const feedback=$('passwordChangeNotice');feedback.textContent='';
+  if($('newPassword').value!==$('confirmPassword').value){feedback.textContent='两次新密码不一致。';return;}
+  if(busy||!connected){feedback.textContent='请连接网络后再修改。';return;}
+  const user=auth.currentUser;if(!user){feedback.textContent='请先重新登录。';return;}
+  busy=true;$('changePassword').disabled=true;renderTabs();syncStatus();
+  let prepared,previousBox,passwordChanged=false,wrapperReady=false;
+  try{
+    rememberCurrentDraft();await flushDraftCache();
+    const payload=(await api.get(api.ref(database,'pages/'+user.uid+'/current'))).val();if(payload)await decrypt(payload);
+    if(!$('currentPasswordField').hidden){await api.reauthenticateWithCredential(user,api.EmailAuthProvider.credential(user.email||session.email,$('currentPassword').value));}
+    const passwordKey=await derive($('newPassword').value,user.uid),id=await wrappingId(passwordKey);
+    prepared=api.ref(database,'pages/'+user.uid+'/keyWraps/'+id);previousBox=(await api.get(prepared)).val();
+    await savePasswordWrap(passwordKey,key,user.uid);wrapperReady=true;
+    await api.updatePassword(user,$('newPassword').value);passwordChanged=true;
+    const previousId=session.wrapId;session.wrapId=id;await persist(session);
+    // Remove only the known previous wrapper; never remove another device's staged change.
+    if(previousId&&previousId!==id)api.remove(api.ref(database,'pages/'+user.uid+'/keyWraps/'+previousId)).catch(()=>{});
+    $('passwordChangeForm').reset();$('passwordDialog').close();tell('密码已修改，内容和草稿保留。其他设备下次登录使用新密码。');
+  }catch(error){
+    if(!passwordChanged&&prepared&&['auth/requires-recent-login','auth/weak-password','auth/invalid-credential','auth/wrong-password','auth/too-many-requests'].includes(error.code)){
+      try{if(previousBox)await api.set(prepared,previousBox);else await api.remove(prepared);}catch{}
+    }
+    if(error.code==='auth/requires-recent-login'){$('currentPasswordField').hidden=false;$('currentPassword').required=true;feedback.textContent='为确认是你本人，请补充当前登录密码后再提交。';}
+    else if(error.code==='auth/invalid-credential'||error.code==='auth/wrong-password')feedback.textContent='当前登录密码不正确。';
+    else feedback.textContent=passwordChanged?'密码已更新，但本机缓存未完成；请用新密码重新登录。':wrapperReady?'修改未完成：'+error.message+'。密钥保护已预先保存，请尝试用新密码登录。':'修改未完成，登录密码未更改：'+error.message;
+  }finally{busy=false;$('changePassword').disabled=false;renderTabs();syncStatus();}
+};
+
+$('passwordDialog').addEventListener('cancel',event=>{if($('changePassword').disabled)event.preventDefault();});
