@@ -3,7 +3,8 @@ const $ = id => document.getElementById(id);
 const storageKey = 'one-page:v1';
 const enc = new TextEncoder(), dec = new TextDecoder();
 let doc = {title:'',html:'',updated:0}, session, key, database, auth, ref, api, unsubscribe;
-let connected = false;
+let connected = false, received = false, pendingReload = false;
+let remoteQueue=Promise.resolve();
 let revision = null, editing = false, conflict = false, busy = false, latest;
 const b64 = bytes => { let result=''; for(let i=0;i<bytes.length;i+=8192) result+=String.fromCharCode(...bytes.subarray(i,i+8192)); return btoa(result); };
 const bytes = value => Uint8Array.from(atob(value), c => c.charCodeAt(0));
@@ -11,16 +12,22 @@ const tell = message => { $('notice').textContent = message; };
 const status = message => { $('status').textContent = message; };
 function sanitize(html) {
   const source = new DOMParser().parseFromString(html, 'text/html');
-  const allowed = new Set(['P','BR','DIV','STRONG','B','EM','I','U','H2','UL','OL','LI','BLOCKQUOTE','IMG']);
+  const allowed = new Set(['P','BR','DIV','STRONG','B','EM','I','U','H2','UL','OL','LI','BLOCKQUOTE','IMG','INPUT','SPAN']);
   function clean(node) {
     if(node.nodeType === 3) return document.createTextNode(node.textContent);
     if(node.nodeType !== 1 || ['SCRIPT','STYLE','IFRAME','OBJECT','SVG','MATH'].includes(node.tagName)) return document.createTextNode('');
+    if(node.tagName === 'INPUT') {
+      if(node.getAttribute('type')!=='checkbox') return document.createTextNode('');
+      const input=document.createElement('input');input.type='checkbox';input.setAttribute('aria-label','完成待办');
+      if(node.hasAttribute('checked')){input.checked=true;input.setAttribute('checked','');}return input;
+    }
     if(node.tagName === 'IMG') {
       const src = node.getAttribute('src') || '';
       if(!/^data:image\/(jpeg|png|webp);base64,[a-zA-Z0-9+/=]+$/.test(src)) return document.createTextNode('');
       const img = document.createElement('img'); img.src=src; img.alt='给自己的图片'; return img;
     }
     const el = document.createElement(allowed.has(node.tagName) ? node.tagName : 'span');
+    if(node.classList.contains('todo-row'))el.className='todo-row';
     for(const child of node.childNodes) el.append(clean(child));
     return el;
   }
@@ -66,44 +73,79 @@ async function connect() {
   await api.setPersistence(auth,api.browserLocalPersistence);
   await auth.authStateReady();
 }
+function syncStatus() {
+  if(!connected)status('离线');
+  else if(!received)status('同步中');
+  else if(conflict)status('有冲突');
+  else status(editing?'未保存':'已同步');
+}
+function flagConflict(value){
+  latest=value;conflict=true;$('conflictActions').hidden=false;
+  tell('另一端已更新，当前修改已保留。请选择保留哪一份。');syncStatus();
+}
+async function acceptRemote(value){
+  latest=value;received=true;
+  if(busy)return;
+  if(editing){if((value?.data||null)!==revision)flagConflict(value);return;}
+  const incoming=value?await decrypt(value):{title:'',html:'',updated:0};
+  if(editing){if((value?.data||null)!==revision)flagConflict(value);return;}
+  if((latest?.data||null)!==(value?.data||null))return;
+  doc=incoming;revision=value?.data||null;session.payload=value;persist(session);render();syncStatus();
+}
 async function listen(user) {
-  if(unsubscribe) unsubscribe();
+  unsubscribe?.();received=false;
   ref=api.ref(database,'pages/'+user.uid+'/current');
-  unsubscribe=api.onValue(ref,async snapshot=>{
-    try {
-      const value=snapshot.val(); latest=value;
-      if(busy) return;
-      if(editing && (value?.data||null)!==revision){conflict=true;$('save').textContent='读取另一端';tell('另一端已更新。当前草稿已保留在编辑框；请先复制想保留的内容，再点下方“读取另一端”。');return;}
-      if(editing || busy) return;
-      doc=value?await decrypt(value):{title:'',html:'',updated:0};revision=value?.data||null;
-      session.payload=value;persist(session);render();status('已连接 · '+(doc.updated?new Date(doc.updated).toLocaleString('zh-CN'):'当前为空白'));
-    }catch(error){tell('无法解密或缓存内容，请核对原密码。'+error.message);}
-  },error=>{status('同步未连接');tell('同步失败，请检查数据库规则和网络：'+error.message);});
-  api.onValue(api.ref(database,'.info/connected'),snapshot=>{connected=!!snapshot.val();if(!connected)status('离线 · 显示此设备已缓存内容');});
+  const stopPage=api.onValue(ref,snapshot=>{
+    const value=snapshot.val();
+    remoteQueue=remoteQueue.then(()=>acceptRemote(value)).catch(error=>tell('同步失败：'+error.message));
+  },error=>{received=false;status('同步失败');tell('请检查网络或数据库规则。');});
+  const stopConnection=api.onValue(api.ref(database,'.info/connected'),snapshot=>{connected=!!snapshot.val();syncStatus();});
+  unsubscribe=()=>{stopPage();stopConnection();};
 }
 $('date').textContent=new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'});
-$('edit').onclick=()=>{$('title').value=doc.title;$('editor').innerHTML=sanitize(doc.html);conflict=false;mode(true);$('title').focus();};
-$('save').onclick=async()=>{
+$('edit').onclick=()=>{
   if(busy)return;
-  if(conflict){
-    if(!confirm('读取另一端会丢弃编辑框内尚未保存的修改，继续吗？'))return;
-    doc=latest?await decrypt(latest):{title:'',html:'',updated:0}; revision=latest?.data||null; conflict=false;mode(false);render();$('save').textContent='保存';tell('已读取另一端。');return;
+  $('title').value=doc.title;$('editor').innerHTML=sanitize(doc.html);
+  conflict=false;mode(true);syncStatus();$('title').focus();
+};
+async function savePage(next, expectedRevision=revision){
+  if(busy)return false;
+  busy=true;$('save').disabled=true;$('edit').disabled=true;
+  try{
+    if(!navigator.onLine||!connected||!received)throw Error('尚未连接，请联网后保存。');
+    const payload=await encrypt(next);
+    const result=await api.runTransaction(ref,current=>{
+      if((current?.data||null)!==expectedRevision)return;
+      return payload;
+    },{applyLocally:false});
+    if(!result.committed){flagConflict(result.snapshot.val());return false;}
+    if((latest?.data||null)===expectedRevision)latest=payload;
+    revision=payload.data;session.payload=payload;persist(session);
+    doc=next;conflict=false;$('conflictActions').hidden=true;mode(false);render();tell('');if(pendingReload&&$('cover').hidden)location.reload();return true;
+  }catch(error){tell(error.message);return false;}
+  finally{
+    busy=false;$('save').disabled=false;$('edit').disabled=false;syncStatus();
+    // A newer server update may have arrived while encrypting or committing.
+    if(received && (latest?.data||null)!==revision && !editing){
+      const pending=latest;
+      remoteQueue=remoteQueue.then(()=>acceptRemote(pending)).catch(error=>tell('同步失败：'+error.message));
+    }
   }
-  const next={title:$('title').value.trim(),html:sanitize($('editor').innerHTML),updated:Date.now()};
-  busy=true;$('save').disabled=true;
-  try {
-    if(session?.config){
-      if(!navigator.onLine || !connected)throw Error('当前离线，请联网后保存。草稿仍在编辑框内。');
-      const payload=await encrypt(next);
-      const result=await api.runTransaction(ref,current=>{
-        if((current?.data||null)!==revision)return;
-        return payload;
-      },{applyLocally:false});
-      if(!result.committed){latest=result.snapshot.val();conflict=true;$('save').textContent='读取另一端';throw Error('另一端已修改，未覆盖云端。先复制要保留的草稿，再读取另一端。');}
-      revision=payload.data;session.payload=payload;persist(session);status('已加密同步 · '+new Date().toLocaleTimeString('zh-CN'));
-    }else{persist({local:next});status('已保存在此设备 · 尚未连接同步');}
-    doc=next;conflict=false;mode(false);render();tell('');
-  }catch(error){tell(error.message);}finally{busy=false;$('save').disabled=false;}
+}
+function draft(){return {title:$('title').value.trim(),html:sanitize($('editor').innerHTML),updated:Date.now()};}
+$('save').onclick=()=>{if(conflict){tell('请先选择保留哪一份。');return;}return savePage(draft());};
+$('useRemote').onclick=async()=>{
+  if(busy||!confirm('放弃当前修改，使用另一端的内容？'))return;
+  try{
+    const value=(await api.get(ref)).val();
+    const incoming=value?await decrypt(value):{title:'',html:'',updated:0};
+    doc=incoming;revision=value?.data||null;latest=value;session.payload=value;persist(session);
+    conflict=false;$('conflictActions').hidden=true;mode(false);render();tell('');syncStatus();
+  }catch(error){tell('读取失败：'+error.message);}
+};
+$('useMine').onclick=async()=>{
+  if(busy||!confirm('用当前修改替换另一端的内容？'))return;
+  await savePage(draft(),latest?.data||null);
 };
 $('clear').onclick=()=>{if(!confirm('清空这一页？保存后生效。'))return;if(!editing)$('edit').click();$('title').value='';$('editor').replaceChildren();tell('');};
 document.querySelectorAll('[data-command]').forEach(button=>{button.onmousedown=e=>e.preventDefault();button.onclick=()=>{$('editor').focus();document.execCommand(button.dataset.command,false,button.dataset.value||null);};});
@@ -176,4 +218,63 @@ async function boot(){
   }
 }
 render();boot();
-if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>tell('离线资源未就绪，请保持联网使用。'));
+if('serviceWorker'in navigator){
+  let refreshing=false;const controlledOnLoad=!!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(!controlledOnLoad)return;
+    if(editing||busy||!$('cover').hidden){pendingReload=true;return;}
+    if(!refreshing){refreshing=true;location.reload();}
+  });
+  navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(registration=>{
+    document.addEventListener('visibilitychange',()=>{
+      if(document.visibilityState==='visible')registration.update().catch(()=>{});
+    });
+  }).catch(()=>tell('离线资源未就绪，请保持联网使用。'));
+}
+
+// Todo rows remain editable; only checkbox clicks are saved automatically in reading mode.
+$('addTodo').onclick=()=>{
+  const row=document.createElement('div');row.className='todo-row';
+  const box=document.createElement('input');box.type='checkbox';box.setAttribute('aria-label','完成待办');
+  const text=document.createElement('span');text.textContent='待办事项';row.append(box,text);
+  $('editor').append(row);text.focus();
+  const selection=getSelection(),range=document.createRange();range.selectNodeContents(text);selection.removeAllRanges();selection.addRange(range);
+};
+function updateCheck(box){if(box.checked)box.setAttribute('checked','');else box.removeAttribute('checked');}
+$('editor').addEventListener('change',event=>{if(event.target.matches('input[type=checkbox]'))updateCheck(event.target);});
+$('reading').addEventListener('change',async event=>{
+  const box=event.target;if(!box.matches('input[type=checkbox]'))return;
+  if(busy){box.checked=!box.checked;return;}
+  updateCheck(box);
+  const next={...doc,html:sanitize($('reading').querySelector('.body').innerHTML),updated:Date.now()};
+  // Retain the attempted checkbox change in the editor if a competing save wins.
+  $('title').value=next.title;$('editor').innerHTML=next.html;mode(true);
+  await savePage(next);
+});
+// Double tap without zoom. Ignore scrolling gestures and interactive controls.
+let lastTap=null, startTap=null, lastToggle=0, savedScroll=0;
+function toggleCover(){
+  if(Date.now()-lastToggle<400)return;
+  lastToggle=Date.now();
+  const cover=$('cover'),show=cover.hidden;
+  if(show){savedScroll=window.scrollY;document.activeElement?.blur();}
+  cover.hidden=!show;document.body.classList.toggle('covered',show);
+  document.title=show?'城市观察':'给自己的话';getSelection()?.removeAllRanges();
+  if(show)cover.scrollTop=0;else{window.scrollTo(0,savedScroll);if(pendingReload&&!editing&&!busy)location.reload();}
+}
+function tapTarget(target){return target.closest('#cover')||target.closest('#reading')||target.closest('#editor');}
+document.addEventListener('pointerdown',event=>{
+  if(event.pointerType!=='touch'||!tapTarget(event.target)||event.target.closest('button,input'))return;
+  startTap={x:event.clientX,y:event.clientY,time:Date.now(),scroll:$('cover').hidden?window.scrollY:$('cover').scrollTop};
+});
+document.addEventListener('pointercancel',()=>{startTap=null;lastTap=null;});
+document.addEventListener('pointerup',event=>{
+  if(event.pointerType!=='touch'||!startTap)return;
+  const start=startTap;startTap=null;
+  const scroll=$('cover').hidden?window.scrollY:$('cover').scrollTop;
+  if(Date.now()-start.time>350||Math.hypot(event.clientX-start.x,event.clientY-start.y)>15||Math.abs(scroll-start.scroll)>5){lastTap=null;return;}
+  const now=Date.now();
+  if(lastTap&&now-lastTap.time<340&&Math.hypot(event.clientX-lastTap.x,event.clientY-lastTap.y)<25){event.preventDefault();lastTap=null;toggleCover();}
+  else lastTap={x:event.clientX,y:event.clientY,time:now};
+},{passive:false});
+document.addEventListener('dblclick',event=>{if(tapTarget(event.target)&&!event.target.closest('input,button')){event.preventDefault();toggleCover();}});

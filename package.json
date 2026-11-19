@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node tests/login.mjs"
+    "test": "node tests/login.mjs && node tests/sync.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1"
