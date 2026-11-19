@@ -182,7 +182,7 @@ function switchPage(index){
     doc=saved.base;$('title').value=saved.content.title;$('editor').innerHTML=saved.content.html;mode(true);
     if(pageToken(book.pages[index])!==pageToken(doc))flagConflict(latest);
   }else{doc=book.pages[index];mode(false);render();}
-  renderTabs();syncStatus();window.scrollTo(0,0);
+  renderTabs();renderDate();syncStatus();window.scrollTo(0,0);
 }
 document.querySelectorAll('[data-page]').forEach(button=>button.onclick=()=>switchPage(Number(button.dataset.page)));
 function renderDate(){
