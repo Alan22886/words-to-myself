@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
-async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').click({clickCount:3,position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await chromium.launch();
 let cloud=null;
 const pages=[];
@@ -69,14 +69,14 @@ try{
  await a.evaluate(()=>window.dispatchEvent(new CustomEvent('mock-connected',{detail:true})));await a.locator('#save').click();await reading(b,'离线草稿');
  // A real touch double tap opens the cover without changing the page scale.
  const heading=b.locator('#reading h1'),bounds=await heading.boundingBox();
- await b.touchscreen.tap(bounds.x+30,bounds.y+15);await b.touchscreen.tap(bounds.x+30,bounds.y+15);
+ await b.touchscreen.tap(bounds.x+30,bounds.y+15);await b.touchscreen.tap(bounds.x+30,bounds.y+15);await b.touchscreen.tap(bounds.x+30,bounds.y+15);
  await b.locator('#cover').waitFor();assert.equal(await b.evaluate(()=>window.visualViewport.scale),1);
  assert.equal(await b.locator('main').evaluate(el=>getComputedStyle(el).visibility),'hidden');
  assert.equal(await b.locator('#cover img,#cover button,#cover time').count(),0);
  await b.locator('#cover').evaluate(el=>el.scrollTop=500);assert.ok(await b.locator('#cover').evaluate(el=>el.scrollTop>0));
  // Move far enough from the entry tap to begin an independent gesture.
  await new Promise(resolve=>setTimeout(resolve,420));
- await b.touchscreen.tap(100,300);await b.touchscreen.tap(100,300);await b.locator('#cover').waitFor({state:'hidden'});
+ await b.touchscreen.tap(100,300);await b.touchscreen.tap(100,300);await b.touchscreen.tap(100,300);await b.locator('#cover').waitFor({state:'hidden'});
  assert.ok(await b.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
  await b.locator('#reading h1').evaluate(el=>el.textContent='x'.repeat(500));assert.ok(await b.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
 
@@ -113,11 +113,11 @@ try{
  await b.locator('[data-page="2"]').click();await reading(b,'third draft');
  // Blank bottom area also opens the cover; editor never does.
  await b.evaluate(()=>window.scrollTo(0,0));await new Promise(resolve=>setTimeout(resolve,420));
- await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.locator('#cover').waitFor();
+ await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.locator('#cover').waitFor();
  assert.ok((await b.locator('#cover').innerText()).includes('The Evening Times'));
  await b.screenshot({path:'/tmp/reminder-english-news.png'});
- await new Promise(resolve=>setTimeout(resolve,420));await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.locator('#cover').waitFor({state:'hidden'});
- await edit(b,'editor stays');const editorBox=await b.locator('#editor').boundingBox();await b.touchscreen.tap(editorBox.x+20,editorBox.y+30);await b.touchscreen.tap(editorBox.x+20,editorBox.y+30);assert.ok(await b.locator('#cover').isHidden());await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);assert.ok(await b.locator('#cover').isHidden());
+ await new Promise(resolve=>setTimeout(resolve,420));await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.locator('#cover').waitFor({state:'hidden'});
+ await edit(b,'editor stays');const editorBox=await b.locator('#editor').boundingBox();await b.touchscreen.tap(editorBox.x+20,editorBox.y+30);await b.touchscreen.tap(editorBox.x+20,editorBox.y+30);await b.touchscreen.tap(editorBox.x+20,editorBox.y+30);assert.ok(await b.locator('#cover').isHidden());await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);await b.touchscreen.tap(20,680);assert.ok(await b.locator('#cover').isHidden());
  await a.screenshot({path:'/tmp/reminder-three-pages.png'});
  const cloudBeforeLogout=JSON.stringify(cloud);b.once('dialog',dialog=>dialog.accept());await b.locator('#date').click();await b.locator('#loginForm').waitFor();
  assert.equal(await b.evaluate(()=>localStorage.getItem('one-page:v1')),null);assert.equal(JSON.stringify(cloud),cloudBeforeLogout);assert.equal(await b.locator('#reading').innerText(),'');

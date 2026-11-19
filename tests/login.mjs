@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
-async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').click({clickCount:3,position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await chromium.launch();
 try {
 const page=await browser.newPage({viewport:{width:390,height:844}});

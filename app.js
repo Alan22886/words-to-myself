@@ -1,4 +1,8 @@
+import { mountReader } from './reader.js';
+import { initBehaviorTools, changeLearningEntry } from './behavior.js';
 import { firebaseConfig } from './config.js';
+let behaviorTools;
+let positionReader=()=>{};
 const $ = id => document.getElementById(id);
 const storageKey = 'one-page:v1';
 const contentLimit=10*1024*1024;
@@ -13,14 +17,14 @@ let draftTimer,draftQueue=Promise.resolve();
 const pageToken=page=>JSON.stringify([page.title,page.html,page.updated]);
 function installBook(value){book=value;doc=book.pages[pageIndex];renderTabs();}
 
-let connected = false, received = false, pendingReload = false;
+let connected = false, received = false, pendingReload = false, quietSaving = false;
 let remoteQueue=Promise.resolve();
 let revision = null, editing = false, conflict = false, busy = false, latest;
 const b64 = bytes => { let result=''; for(let i=0;i<bytes.length;i+=8192) result+=String.fromCharCode(...bytes.subarray(i,i+8192)); return btoa(result); };
 const bytes = value => Uint8Array.from(atob(value), c => c.charCodeAt(0));
 const tell = message => { $('notice').textContent = message; };
 const status = message => {
-  const target=$('status');target.replaceChildren();target.title=message;target.setAttribute('aria-label',message);
+  const target=$('status');if(target.getAttribute('aria-label')===message)return;target.replaceChildren();target.title=message;target.setAttribute('aria-label',message);
   if(!message){target.dataset.state='';return;}
   const state=message==='已同步'?'synced':message==='未保存'?'dirty':message==='有冲突'?'conflict':/正在|同步中/.test(message)?'syncing':'offline';
   target.dataset.state=state;
@@ -56,6 +60,12 @@ function sanitize(html) {
     if(['italic','normal'].includes(node.style.fontStyle))el.style.fontStyle=node.style.fontStyle;
     if(node.classList.contains('todo-row'))el.className='todo-row';
     if(node.classList.contains('todo-text'))el.className='todo-text';
+    for(const name of ['learning-entry','learning-date','learning-content'])if(node.classList.contains(name))el.classList.add(name);
+    if(el.classList.contains('learning-entry')){
+      const id=node.getAttribute('data-learning-id'),at=node.getAttribute('data-learning-at');
+      if(id&&/^[a-zA-Z0-9-]{1,64}$/.test(id))el.dataset.learningId=id;
+      if(at&&/^\d{1,16}$/.test(at))el.dataset.learningAt=at;
+    }
     for(const child of node.childNodes) el.append(clean(child));
     return el;
   }
@@ -242,11 +252,12 @@ async function listen(user) {
 }
 function renderTabs(){
   document.querySelectorAll('[data-page]').forEach(button=>{
-    const index=Number(button.dataset.page);button.disabled=busy;
+    const index=Number(button.dataset.page);button.disabled=busy&&!quietSaving;
     button.setAttribute('aria-current',index===pageIndex?'page':'false');
     button.classList.toggle('has-draft',drafts.has(index));
     button.title=book.pages[index].title||`第 ${index+1} 页`;
   });
+  behaviorTools?.refreshRecords();
 }
 function switchPage(index){
   if(busy||index===pageIndex)return;
@@ -282,7 +293,10 @@ $('cancel').onclick=()=>{
 async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
   if(busy)return false;
   const target=pageIndex;
-  busy=true;$('save').disabled=true;$('edit').disabled=true;renderTabs();syncStatus();
+  busy=true;quietSaving=inPlace;
+  let quietProgress;
+  if(inPlace)quietProgress=setTimeout(()=>{if(busy)status('同步中');},500);
+  else{$('save').disabled=true;$('edit').disabled=true;renderTabs();syncStatus();}
   try{
     if(!navigator.onLine||!connected||!received)throw Error('尚未连接，请联网后保存。');
     let committedPayload,merged;
@@ -306,7 +320,9 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
     if(pendingReload&&!drafts.size&&$('cover').hidden)location.reload();return true;
   }catch(error){tell(error.message);return false;}
   finally{
-    busy=false;$('save').disabled=false;$('edit').disabled=false;syncStatus();renderTabs();
+    clearTimeout(quietProgress);busy=false;quietSaving=false;
+    if(!inPlace){$('save').disabled=false;$('edit').disabled=false;renderTabs();}
+    syncStatus();
     if(received&&cipherToken(latest)!==revision&&!editing){
       const pending=latest;remoteQueue=remoteQueue.then(()=>acceptRemote(pending)).catch(handleSyncFailure);
     }
@@ -542,7 +558,7 @@ $('reading').addEventListener('change',async event=>{
     else{box.checked=!box.checked;updateCheck(box);}
   }
 });
-// Double tap without zoom. Ignore scrolling gestures and interactive controls.
+// Triple tap without zoom. Ignore scrolling gestures and interactive controls.
 let lastTap=null, startTap=null, lastToggle=0, savedScroll=0;
 const idleDuration=2*60*1000;
 let idleTimer,lastActivity=Date.now();
@@ -553,15 +569,15 @@ function armIdle(){
 }
 function setCover(show){
   const cover=$('cover'),main=document.querySelector('main');
-  if(show===!cover.hidden){if(show)clearTimeout(idleTimer);return;}
+  if(show===!cover.hidden){if(show){clearTimeout(idleTimer);positionReader();}return;}
   if(show){
     savedScroll=window.scrollY;document.activeElement?.blur();
     if($('passwordDialog').open)$('passwordDialog').close();
     rememberCurrentDraft();flushDraftCache();
   }
   cover.hidden=!show;main.inert=show;main.setAttribute('aria-hidden',String(show));document.body.classList.toggle('covered',show);
-  document.title=show?'The Evening Times':'给自己的话';getSelection()?.removeAllRanges();
-  if(show){cover.scrollTop=0;clearTimeout(idleTimer);}
+  document.title=show?'The Evening Times':'word 2 myself';getSelection()?.removeAllRanges();
+  if(show){positionReader();clearTimeout(idleTimer);}
   else{lastActivity=Date.now();armIdle();window.scrollTo(0,savedScroll);if(pendingReload&&!editing&&!drafts.size&&!busy)location.reload();}
 }
 function toggleCover(){
@@ -594,10 +610,13 @@ document.addEventListener('pointerup',event=>{
   const scroll=$('cover').hidden?window.scrollY:$('cover').scrollTop;
   if(Date.now()-start.time>350||Math.hypot(event.clientX-start.x,event.clientY-start.y)>15||Math.abs(scroll-start.scroll)>5){lastTap=null;return;}
   const now=Date.now();
-  if(lastTap&&now-lastTap.time<340&&Math.hypot(event.clientX-lastTap.x,event.clientY-lastTap.y)<25){event.preventDefault();lastTap=null;toggleCover();}
-  else lastTap={x:event.clientX,y:event.clientY,time:now};
+  if(lastTap&&now-lastTap.time<340&&Math.hypot(event.clientX-lastTap.x,event.clientY-lastTap.y)<25){
+    const count=lastTap.count+1;
+    if(count===3){event.preventDefault();lastTap=null;toggleCover();}
+    else lastTap={x:event.clientX,y:event.clientY,time:now,count};
+  }else lastTap={x:event.clientX,y:event.clientY,time:now,count:1};
 },{passive:false});
-document.addEventListener('dblclick',event=>{if(tapTarget(event.target)&&!event.target.closest('input,button')){event.preventDefault();toggleCover();}});
+document.addEventListener('click',event=>{if(event.detail===3&&tapTarget(event.target)&&!event.target.closest('input,button')){event.preventDefault();toggleCover();}});
 
 $('editor').addEventListener('input',()=>{normalizeFontSizes();for(const row of $('editor').querySelectorAll('.todo-row')){if(!row.querySelector('input[type=checkbox]')||!row.querySelector('span'))row.classList.remove('todo-row');}});
 
@@ -611,7 +630,7 @@ $('date').onclick=async()=>{
     await api.signOut(auth);unsubscribe?.();unsubscribe=null;
     session=null;key=null;ref=null;revision=null;latest=null;received=false;connected=false;
     drafts.clear();book={pages:[emptyPage(),emptyPage(),emptyPage()]};pageIndex=0;doc=book.pages[0];
-    clearTimeout(draftTimer);await draftQueue;localStorage.removeItem(storageKey);await cachedPayload('delete');await cachedPayload('delete',undefined,'drafts');conflict=false;$('conflictActions').hidden=true;
+    clearTimeout(draftTimer);await draftQueue;localStorage.removeItem(storageKey);await cachedPayload('delete');await cachedPayload('delete',undefined,'drafts');await cachedPayload('delete',undefined,'behavior');conflict=false;$('conflictActions').hidden=true;
     $('title').value='';$('editor').replaceChildren();$('password').value='';
     mode(false);render();showLogin();$('email').value=email||'';status('');tell('');window.scrollTo(0,0);
   }catch(error){tell('退出失败：'+error.message);}
@@ -670,3 +689,61 @@ $('passwordChangeForm').onsubmit=async event=>{
 };
 
 $('passwordDialog').addEventListener('cancel',event=>{if($('changePassword').disabled)event.preventDefault();});
+
+// Small action tools live outside the editor/sync/cover implementation.
+let chosenBehaviorTask;
+function insertBehaviorNodes(nodes){
+  if(!session?.key)throw Error('请先登录。');
+  if(busy)throw Error('正在保存，请稍后再试。');
+  if(!editing)$('edit').click();
+  $('editor').append(...nodes);rememberCurrentDraft();scheduleDraftCache();
+}
+async function changeLearningPage(change){
+  if(busy)throw Error('正在保存，请稍后再试。');
+  if(!session?.key||!navigator.onLine||!connected||!received)throw Error('请联网并登录后再保存记录；输入会留在本机。');
+  if(drafts.has(1)||(editing&&pageIndex===1&&contentChanged(draft(),doc)))throw Error('第二页有未保存修改，请先保存或取消，再记这一句。');
+  busy=true;$('save').disabled=true;$('edit').disabled=true;renderTabs();syncStatus();
+  try{
+    let payload,merged;
+    for(let attempt=0;attempt<4;attempt++){
+      const current=(await api.get(ref)).val(),fresh=current?await decrypt(current):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+      const changed={...fresh.pages[1],html:sanitize(changeLearningEntry(fresh.pages[1].html,change)),updated:Date.now()};
+      merged={pages:fresh.pages.map((page,index)=>index===1?changed:page)};
+      const next=await encrypt(merged),expected=cipherToken(current);
+      const result=await api.runTransaction(ref,value=>cipherToken(value)===expected?next:undefined,{applyLocally:false});
+      if(result.committed){payload=next;if(cipherToken(latest)===expected)latest=next;break;}
+    }
+    if(!payload)throw Error('另一端正在更新，请再点一次保存。');
+    book=merged;revision=cipherToken(payload);session.payload=payload;await persist(session);
+    if(editing){if(pageToken(book.pages[pageIndex])!==pageToken(doc))flagConflict(payload);}
+    else{doc=book.pages[pageIndex];render();}
+    renderTabs();return true;
+  }finally{
+    busy=false;$('save').disabled=false;$('edit').disabled=false;renderTabs();syncStatus();
+    if(received&&cipherToken(latest)!==revision){const pending=latest;remoteQueue=remoteQueue.then(()=>acceptRemote(pending)).catch(handleSyncFailure);}
+  }
+}
+behaviorTools=initBehaviorTools({
+  ready:()=>!!session?.key&&$('loginForm').hidden,
+  owner:()=>session?.key?session:undefined,
+  currentPage:()=>pageIndex,
+  chooseTask:row=>{chosenBehaviorTask=row;},
+  selectedTask:()=>{const row=(editing?currentTask():null)||(chosenBehaviorTask?.isConnected?chosenBehaviorTask:null);chosenBehaviorTask=null;return row?.querySelector('span')?.textContent?.trim()||'';},
+  learningHtml:()=>book.pages[1].html,
+  changeLearning:changeLearningPage,
+  async loadLocal(owner){
+    if(owner!==session||!key)return null;const record=await cachedPayload('get',undefined,'behavior');return record?decryptRaw(record):null;
+  },
+  async saveLocal(value,owner){
+    if(!owner||owner!==session||!key)return;const cryptoKey=key,payload=await encrypt(value,cryptoKey);
+    if(owner!==session)return;await cachedPayload('put',payload,'behavior');
+  },
+  insertReflection(context,answer){
+    const block=document.createElement('blockquote');if(context){const title=document.createElement('p');title.textContent=context;block.append(title);}const text=document.createElement('p');text.textContent=answer;block.append(text);insertBehaviorNodes([block]);
+  },
+  insertPrinciple(){
+    const title=document.createElement('h2');title.textContent='关于……';const body=document.createElement('p');body.textContent='我愿意记住：';insertBehaviorNodes([title,body]);caretIn(title,true);
+  }
+});
+
+positionReader=mountReader($('cover'));positionReader();

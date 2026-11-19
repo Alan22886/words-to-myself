@@ -1,6 +1,6 @@
 import { chromium, webkit } from '@playwright/test';
 import assert from 'node:assert/strict';
-async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').click({clickCount:3,position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await (process.env.PRIVACY_BROWSER==='webkit'?webkit:chromium).launch();
 try {
 const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});const page=await context.newPage();
@@ -31,8 +31,8 @@ assert.ok(await page.locator('#cover').isVisible());assert.equal(await page.loca
 await openPrivate();await page.locator('#email').fill('me@example.com');await page.locator('#password').fill('test-password');await page.locator('#login').click();await page.locator('#edit').waitFor();
 await page.locator('#edit').click();await page.locator('#title').fill('private title');await page.locator('#editor').fill(Array.from({length:45},(_,i)=>'private line '+i).join('\n'));await page.locator('#save').click();await page.locator('#edit').waitFor();
 await page.evaluate(()=>window.scrollTo(0,450));const position=await page.evaluate(()=>scrollY),cloud=await page.evaluate(()=>localStorage.getItem('mock-cloud'));
-await page.clock.fastForward(119000);assert.ok(await page.locator('#cover').isHidden());await page.keyboard.press('ArrowRight');
-await page.clock.fastForward(119000);assert.ok(await page.locator('#cover').isHidden());await page.clock.fastForward(1100);await page.locator('#cover').waitFor();assert.equal(await page.locator('main').evaluate(el=>el.inert),true);
+await page.clock.runFor(100);await page.clock.fastForward(119000);assert.ok(await page.locator('#cover').isHidden());await page.keyboard.press('a');
+await page.clock.runFor(100);await page.clock.fastForward(119000);assert.ok(await page.locator('#cover').isHidden());await page.clock.fastForward(1100);await page.locator('#cover').waitFor();assert.equal(await page.locator('main').evaluate(el=>el.inert),true);
 assert.equal(await page.evaluate(()=>localStorage.getItem('mock-cloud')),cloud);await openPrivate();assert.ok(Math.abs((await page.evaluate(()=>scrollY))-position)<2);
 await page.locator('#edit').click();await page.locator('#title').fill('unsaved private draft');await page.clock.fastForward(120100);await page.locator('#cover').waitFor();await openPrivate();assert.equal(await page.locator('#title').inputValue(),'unsaved private draft');assert.ok(await page.locator('#editing').isVisible());
 // Simulate mobile background/foreground lifecycle, including back-forward cache restoration.
@@ -41,5 +41,5 @@ await page.evaluate(()=>{Object.defineProperty(document,'visibilityState',{confi
 await page.evaluate(()=>dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));await page.locator('#cover').waitFor();await openPrivate();
 await page.locator('#cancel').click();await page.locator('#accountSettings').click();await page.locator('#newPassword').fill('not-submitted-password');await page.clock.fastForward(120100);await page.locator('#cover').waitFor();assert.ok(!(await page.locator('#passwordDialog').evaluate(el=>el.open)));
 await page.reload();assert.ok(await page.locator('#cover').isVisible());assert.equal(await page.locator('main').evaluate(el=>el.inert),true);
-console.log('PASS: news-first startup and reload; double-click reveal; idle 2-minute cover; activity extends timeout; scroll and drafts preserved; background and bfcache cover; foreground remains covered; account dialog hidden on idle; no cloud content change');
+console.log('PASS: news-first startup and reload; triple-click reveal; idle 2-minute cover; activity extends timeout; scroll and drafts preserved; background and bfcache cover; foreground remains covered; account dialog hidden on idle; no cloud content change');
 } finally { await browser.close(); }
