@@ -1,0 +1,40 @@
+# 留一页 · 给自己的话
+
+当前界面为纯黑底，首次显示邮箱、密码和登录；登录后仅保留日期、正文和编辑操作。Firebase Web 配置已内置于 `config.js`，不需要用户输入配置。
+
+## 完成 Firebase 配置
+
+1. Authentication → Sign-in method，开启 Email/Password。
+2. Authentication → Users → Add user，创建自己的邮箱账号和独立密码。请妥善保存原密码，它也用于解密。
+3. Realtime Database → Rules，把 `database.rules.json` 完整粘贴并 Publish。不要开启公开读写。
+4. 在两端打开 `/words-to-myself/`，使用同一个邮箱和密码登录。
+5. 分别修改文字、加入图片并保存，确认另一端即时更新。数据库 `pages/<uid>/current` 应只有 `v / iv / data`，不含正文。
+
+如果出现 unauthorized-domain，在 Authentication → Settings → Authorized domains 添加 GitHub Pages 域名（例如 `alan22886.github.io`）。如果所在网络无法连接 Firebase，需要能访问该服务的网络。免费配额以控制台为准。
+
+旧版本的本机内容在登录前仍保存在浏览器中；登录显示云端内容时会要求确认替换。不会自动上传旧本机内容。
+
+## 使用
+
+打开先阅读；“编辑这一页”支持粗体、斜体、小标题、列表和插图。粘贴按纯文本处理。图片会缩小到最长边 1400 像素，一页总内容有限制。只保留当前一页；新内容覆盖旧内容，或在原页面末尾继续写。清空后需点保存才影响其他设备。没有归档、版本列表、回收站或自动到期时间；保留当前页直到用户替换。
+
+同步使用 Firebase 实时订阅，点保存后更新；同时编辑时事务检查密文版本，拒绝覆盖另一端的新版本。发生冲突先复制想保留的草稿，再“读取另一端”。编辑中的草稿仅在内存，退出页面会提示；离线时保留编辑框但不提交云端修改。
+
+首次登录需要联网。登录会替换旧版本的本机这一页，请先复制要保留的内容。连接后当前页的本地缓存与云端存储均为 AES-256-GCM 密文，每次保存使用随机 IV；密码使用 PBKDF2-SHA256（600000 次，账号 UID 作为盐的一部分）派生密钥。
+
+首次登录后 Firebase 登录状态和解密密钥留在设备浏览器，不保存密码。它们让之后直接打开成为可能；能访问此浏览器存储的人仍可能解密，适合个人轻量提醒。退出会清除此工具本地缓存与密钥，云端页仍保留。浏览器清理数据、隐私浏览或系统回收存储后需重登。
+
+**不要在控制台随意修改或重置密码**：密码也是解密密码，使用新密码无法解密原内容。需要换密码时先复制当前内容，并保留原密码；本版本没有密钥迁移或密码找回功能。
+
+## 安装与离线
+
+iPhone Safari 分享 → 添加到主屏幕；Android 浏览器菜单 → 安装应用 / 添加到主屏幕。安装入口可能使用独立存储，因此在主屏幕入口也需要登录一次。首次联网打开并缓存后，可离线阅读当前内容。新的设备首次连接需要联网加载 Firebase SDK。离线不承诺 Firebase 登录或同步。
+
+## 验证范围
+
+运行 `python3 -m http.server 4181 --bind 127.0.0.1` 后，运行 `node tests/login.mjs`。模拟 Firebase 的浏览器测试覆盖登录失败提示、登录成功、密文保存、刷新自动登录及解密、黑色移动端布局。先前版本也验证过危险 HTML 过滤。真实 Firebase 的认证、规则、实时更新、跨设备冲突和 iOS 主屏幕安装需完成上述配置后再实测。
+
+参考官方文档：
+- https://firebase.google.com/docs/auth/web/password-auth
+- https://firebase.google.com/docs/database/web/read-and-write
+- https://firebase.google.com/docs/database/security
