@@ -8,6 +8,8 @@ const emptyPage=()=>({title:'',html:'',updated:0});
 let book={pages:[emptyPage(),emptyPage(),emptyPage()]},pageIndex=0;
 let doc=book.pages[0],session,key,database,auth,ref,api,unsubscribe;
 const drafts=new Map();
+const readingPositions=[0,0,0];
+let draftTimer,draftQueue=Promise.resolve();
 const pageToken=page=>JSON.stringify([page.title,page.html,page.updated]);
 function installBook(value){book=value;doc=book.pages[pageIndex];renderTabs();}
 
@@ -48,6 +50,10 @@ function sanitize(html) {
       const probe=document.createElement('span');probe.style.color=color;
       if(['rgb(239, 115, 115)','rgb(128, 184, 239)','rgb(232, 232, 232)'].includes(probe.style.color))el.style.color=probe.style.color;
     }
+    const fontSize=node.style.fontSize||({2:'16px',3:'19px',5:'26px'}[node.getAttribute('size')]);
+    if(['16px','19px','26px'].includes(fontSize))el.style.fontSize=fontSize;
+    if(['bold','normal','400','700'].includes(node.style.fontWeight))el.style.fontWeight=node.style.fontWeight;
+    if(['italic','normal'].includes(node.style.fontStyle))el.style.fontStyle=node.style.fontStyle;
     if(node.classList.contains('todo-row'))el.className='todo-row';
     if(node.classList.contains('todo-text'))el.className='todo-text';
     for(const child of node.childNodes) el.append(clean(child));
@@ -66,25 +72,28 @@ function render() {
   }
   $('edit').textContent='编辑';renderTabs();renderDate();
 }
-function mode(value) { editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; }
+function mode(value) { editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value; }
 async function derive(password, uid) {
   const material=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode('one-page:v1:'+uid),iterations:600000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},true,['encrypt','decrypt']);
 }
-async function encrypt(value) {
+async function encrypt(value,cryptoKey=key,maxBytes=contentLimit) {
   const plaintext=enc.encode(JSON.stringify(value));
-  if(plaintext.byteLength>contentLimit)throw Error('三页内容合计超过 10 MB，请减少一些图片或文字。');
+  if(plaintext.byteLength>maxBytes)throw Error('三页内容合计超过 10 MB，请减少一些图片或文字。');
   const iv=crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,plaintext);
+  const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},cryptoKey,plaintext);
   const data=b64(new Uint8Array(ciphertext));
   // Keep small saves compatible with the original rules. Large saves use bounded chunks.
   if(data.length<=2700000)return {v:1,iv:b64(iv),data};
   const chunks=[];for(let offset=0;offset<data.length;offset+=1000000)chunks.push(data.slice(offset,offset+1000000));
   return {v:2,iv:b64(iv),data:chunks};
 }
-async function decrypt(value) {
-  const decoded=await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes(value.iv)},key,bytes(Array.isArray(value.data)?value.data.join(''):value.data));
-  const valueDoc=JSON.parse(dec.decode(decoded));
+async function decryptRaw(value,cryptoKey=key){
+  const decoded=await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes(value.iv)},cryptoKey,bytes(Array.isArray(value.data)?value.data.join(''):value.data));
+  return JSON.parse(dec.decode(decoded));
+}
+async function decrypt(value,cryptoKey=key) {
+  const valueDoc=await decryptRaw(value,cryptoKey);
   const pages=Array.isArray(valueDoc.pages)?valueDoc.pages:[valueDoc];
   if(pages.length>3)throw Error('页面数量不正确');
   return {pages:Array.from({length:3},(_,index)=>{
@@ -102,12 +111,12 @@ function openCache(){
   });
   return cacheDatabase;
 }
-async function cachedPayload(action,value){
+async function cachedPayload(action,value,cacheKey='payload'){
   const db=await openCache();
   return new Promise((resolve,reject)=>{
     const transaction=db.transaction('current',action==='get'?'readonly':'readwrite');
     const store=transaction.objectStore('current');
-    const request=action==='get'?store.get('payload'):action==='delete'?store.delete('payload'):store.put(value,'payload');
+    const request=action==='get'?store.get(cacheKey):action==='delete'?store.delete(cacheKey):store.put(value,cacheKey);
     transaction.oncomplete=()=>resolve(request.result);
     transaction.onerror=()=>reject(transaction.error);transaction.onabort=()=>reject(transaction.error);
   });
@@ -117,6 +126,43 @@ async function persist(value){
   await cachedPayload('put',payload||null);
   localStorage.setItem(storageKey,JSON.stringify(metadata));
 }
+function contentChanged(content,base){return content.title!==base.title||content.html!==base.html;}
+function rememberCurrentDraft(){
+  if(!editing)return;
+  const content=draft();
+  if(contentChanged(content,doc))drafts.set(pageIndex,{content,base:doc});else drafts.delete(pageIndex);
+  renderTabs();
+}
+function scheduleDraftCache(){clearTimeout(draftTimer);draftTimer=setTimeout(()=>flushDraftCache(),250);}
+function flushDraftCache(){
+  clearTimeout(draftTimer);const owner=session,cryptoKey=key;
+  if(!owner?.key||!cryptoKey)return Promise.resolve();
+  const snapshot=[...drafts].map(([index,value])=>({index,...value}));
+  draftQueue=draftQueue.catch(()=>{}).then(async()=>{
+    if(session!==owner)return;
+    const payload=snapshot.length?await encrypt({drafts:snapshot},cryptoKey,contentLimit*6):null;
+    if(session!==owner)return;
+    await cachedPayload(payload?'put':'delete',payload,'drafts');
+  }).catch(error=>tell('草稿暂时无法缓存，请保存后再关闭：'+error.message));
+  return draftQueue;
+}
+async function restoreDraftCache(alternateKey){
+  const payload=await cachedPayload('get',undefined,'drafts');if(!payload)return;
+  let recovered;
+  try{recovered=await decryptRaw(payload);}catch(error){if(!alternateKey)throw error;recovered=await decryptRaw(payload,alternateKey);}
+  drafts.clear();
+  for(const entry of recovered.drafts||[]){
+    if(!Number.isInteger(entry.index)||entry.index<0||entry.index>2)continue;
+    if(!entry.content||!entry.base)continue;
+    for(const page of [entry.content,entry.base]){if(typeof page.title!=='string'||typeof page.html!=='string')throw Error('草稿格式不正确');page.html=sanitize(page.html);}
+    drafts.set(entry.index,{content:entry.content,base:entry.base});
+  }
+  renderTabs();
+}
+$('editor').addEventListener('input',()=>{rememberCurrentDraft();scheduleDraftCache();});
+$('title').addEventListener('input',()=>{rememberCurrentDraft();scheduleDraftCache();});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){rememberCurrentDraft();flushDraftCache();}});
+window.addEventListener('pagehide',()=>{rememberCurrentDraft();flushDraftCache();});
 async function connect() {
   status('正在连接…');
   const base='https://www.gstatic.com/firebasejs/11.10.0/';
@@ -175,14 +221,15 @@ function renderTabs(){
 }
 function switchPage(index){
   if(busy||index===pageIndex)return;
-  if(editing)drafts.set(pageIndex,{content:draft(),base:doc});
+  if(!editing)readingPositions[pageIndex]=window.scrollY;
+  else{rememberCurrentDraft();flushDraftCache();}
   pageIndex=index;conflict=false;$('conflictActions').hidden=true;tell('');
   const saved=drafts.get(index);
   if(saved){
     doc=saved.base;$('title').value=saved.content.title;$('editor').innerHTML=saved.content.html;mode(true);
     if(pageToken(book.pages[index])!==pageToken(doc))flagConflict(latest);
   }else{doc=book.pages[index];mode(false);render();}
-  renderTabs();renderDate();syncStatus();window.scrollTo(0,0);
+  renderTabs();renderDate();syncStatus();window.scrollTo(0,editing?0:readingPositions[index]);
 }
 document.querySelectorAll('[data-page]').forEach(button=>button.onclick=()=>switchPage(Number(button.dataset.page)));
 function renderDate(){
@@ -191,8 +238,17 @@ function renderDate(){
 renderDate();
 $('edit').onclick=()=>{
   if(busy)return;
-  $('title').value=doc.title;$('editor').innerHTML=sanitize(doc.html);
+  readingPositions[pageIndex]=window.scrollY;
+  const saved=drafts.get(pageIndex);doc=saved?.base||book.pages[pageIndex];
+  $('title').value=(saved?.content||doc).title;$('editor').innerHTML=sanitize((saved?.content||doc).html);
   conflict=false;mode(true);syncStatus();
+  if(saved&&pageToken(doc)!==pageToken(book.pages[pageIndex]))flagConflict(latest);
+};
+$('cancel').onclick=()=>{
+  if(busy)return;
+  if(contentChanged(draft(),doc)&&!confirm('放弃本页未保存的修改？'))return;
+  drafts.delete(pageIndex);flushDraftCache();doc=book.pages[pageIndex];conflict=false;$('conflictActions').hidden=true;
+  mode(false);render();syncStatus();tell('');window.scrollTo(0,readingPositions[pageIndex]);
 };
 async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
   if(busy)return false;
@@ -216,7 +272,7 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
     }
     if(!committedPayload)throw Error('另一端正在更新，请再点一次保存。');
     revision=cipherToken(committedPayload);session.payload=committedPayload;await persist(session);
-    book=merged;doc=next;drafts.delete(target);conflict=false;$('conflictActions').hidden=true;
+    book=merged;doc=next;drafts.delete(target);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;
     if(!inPlace){mode(false);render();}else renderDate();tell('');
     if(pendingReload&&!drafts.size&&$('cover').hidden)location.reload();return true;
   }catch(error){tell(error.message);return false;}
@@ -234,7 +290,7 @@ $('useRemote').onclick=async()=>{
   try{
     const value=(await api.get(ref)).val();
     const incoming=value?await decrypt(value):{pages:[emptyPage(),emptyPage(),emptyPage()]};
-    installBook(incoming);drafts.delete(pageIndex);revision=cipherToken(value);latest=value;session.payload=value;await persist(session);
+    installBook(incoming);drafts.delete(pageIndex);flushDraftCache();revision=cipherToken(value);latest=value;session.payload=value;await persist(session);
     conflict=false;$('conflictActions').hidden=true;mode(false);render();tell('');syncStatus();
   }catch(error){tell('读取失败：'+error.message);}
 };
@@ -242,8 +298,27 @@ $('useMine').onclick=async()=>{
   if(busy||!confirm('用当前修改替换另一端的内容？'))return;
   try{const remote=latest?await decrypt(latest):{pages:[emptyPage(),emptyPage(),emptyPage()]};await savePage(draft(),pageToken(remote.pages[pageIndex]));}catch(error){tell(error.message);}
 };
-$('clear').onclick=()=>{if(!confirm('清空这一页？保存后生效。'))return;if(!editing)$('edit').click();$('title').value='';$('editor').replaceChildren();tell('');};
-document.querySelectorAll('[data-command]').forEach(button=>{button.onmousedown=e=>e.preventDefault();button.onclick=()=>{$('editor').focus();document.execCommand(button.dataset.command,false,button.dataset.value||null);};});
+$('clear').onclick=()=>{if(!confirm('清空这一页？保存后生效。'))return;if(!editing)$('edit').click();$('title').value='';$('editor').replaceChildren();rememberCurrentDraft();scheduleDraftCache();tell('');};
+function normalizeFontSizes(){for(const font of $('editor').querySelectorAll('font[size]')){font.style.fontSize={2:'16px',3:'19px',5:'26px'}[font.getAttribute('size')]||'19px';font.removeAttribute('size');}}
+document.querySelectorAll('[data-command]').forEach(button=>{
+  button.onmousedown=event=>event.preventDefault();
+  button.onclick=()=>{
+    const editor=$('editor'),selection=getSelection();
+    const selected=selection?.rangeCount&&!selection.isCollapsed&&editor.contains(selection.getRangeAt(0).commonAncestorContainer);
+    editor.focus({preventScroll:true});
+    if(button.dataset.command==='removeFormat'&&!selected){
+      const range=document.createRange();range.selectNodeContents(editor);selection.removeAllRanges();selection.addRange(range);
+    }
+    document.execCommand(button.dataset.command,false,button.dataset.value||null);
+    if(button.dataset.command==='fontSize'){
+      for(const font of editor.querySelectorAll('font[size]')){
+        font.style.fontSize={2:'16px',3:'19px',5:'26px'}[font.getAttribute('size')]||'19px';font.removeAttribute('size');
+      }
+    }
+    if(button.dataset.command==='removeFormat'&&!selected)selection.collapseToEnd();
+    rememberCurrentDraft();scheduleDraftCache();
+  };
+});
 $('editor').addEventListener('paste',event=>{event.preventDefault();document.execCommand('insertText',false,event.clipboardData.getData('text/plain'));});
 $('editor').addEventListener('drop',event=>event.preventDefault());
 $('image').onchange=async event=>{
@@ -255,10 +330,10 @@ $('image').onchange=async event=>{
     const img=document.createElement('img');img.src=canvas.toDataURL('image/jpeg',.8);img.alt='给自己的图片';
     const total=book.pages.reduce((size,page,index)=>size+(index===pageIndex?0:enc.encode(page.html).byteLength),0)+enc.encode($('editor').innerHTML).byteLength+img.src.length;
     if(total>contentLimit-2048)throw Error('三页内容合计接近 10 MB，请先减少一些内容。');
-    $('editor').append(img,document.createElement('p'));tell('');
+    $('editor').append(img,document.createElement('p'));rememberCurrentDraft();scheduleDraftCache();tell('');
   }catch(error){tell(error.message);}event.target.value='';
 };
-window.addEventListener('beforeunload',event=>{if(editing||drafts.size){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if((editing&&contentChanged(draft(),doc))||drafts.size){event.preventDefault();event.returnValue='';}});
 function showLogin() {
   $('date').disabled=true;$('date').textContent='未登录';
   $('loginForm').hidden=false;$('page').hidden=true;
@@ -268,20 +343,45 @@ function showPage() {$('date').disabled=false;$('loginForm').hidden=true;$('page
 $('loginForm').onsubmit=async event=>{
   event.preventDefault();$('login').disabled=true;tell('');
   const previous=session, previousKey=key;
+  unsubscribe?.();unsubscribe=null;
+  let migrated=false,draftRecoveryKey=previousKey;
   try {
     session={config:firebaseConfig,email:$('email').value.trim()};
     await connect();
     const credential=await api.signInWithEmailAndPassword(auth,session.email,$('password').value);
     key=await derive($('password').value,credential.user.uid);
-    const snapshot=await api.get(api.ref(database,'pages/'+credential.user.uid+'/current'));
-    const payload=snapshot.val();
-    const cloudDoc=payload?await decrypt(payload):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+    const target=api.ref(database,'pages/'+credential.user.uid+'/current');
+    let payload=(await api.get(target)).val(),cloudDoc;
+    try{cloudDoc=payload?await decrypt(payload):{pages:[emptyPage(),emptyPage(),emptyPage()]};}
+    catch(error){
+      if(error.name!=='OperationError')throw error;
+      let recoveryKey,recovered;
+      if(previousKey){try{recovered=await decrypt(payload,previousKey);recoveryKey=previousKey;}catch{}}
+      if(!recovered&&$('recoveryPassword').value){
+        recoveryKey=await derive($('recoveryPassword').value,credential.user.uid);
+        try{recovered=await decrypt(payload,recoveryKey);}catch{throw Object.assign(Error('原加密密码不正确，请核对重置前的密码。'),{code:'recovery/incorrect'});}
+      }
+      if(!recovered){
+        $('recoveryField').hidden=false;$('recoveryPassword').required=true;
+        throw Object.assign(Error('登录密码已验证。请填写重置前的原加密密码以恢复内容。'),{code:'recovery/required'});
+      }
+      draftRecoveryKey=recoveryKey;
+      for(let attempt=0;attempt<3;attempt++){
+        if(!payload){cloudDoc={pages:[emptyPage(),emptyPage(),emptyPage()]};break;}
+        const restored=await decrypt(payload,recoveryKey),replacement=await encrypt(restored,key),expected=cipherToken(payload);
+        const result=await api.runTransaction(target,current=>cipherToken(current)===expected?replacement:undefined,{applyLocally:false});
+        if(result.committed){payload=replacement;cloudDoc=restored;migrated=true;break;}
+        payload=result.snapshot.val();
+        try{cloudDoc=payload?await decrypt(payload):{pages:[emptyPage(),emptyPage(),emptyPage()]};break;}catch{}
+      }
+      if(!cloudDoc)throw Error('其他设备正在更新，请稍后再次恢复。');
+    }
     if((doc.title||doc.html) && !previous?.key && !confirm('登录后显示云端内容，本机内容将替换。继续？')) {
       await api.signOut(auth);session=previous;key=previousKey;return;
     }
     session.key=b64(new Uint8Array(await crypto.subtle.exportKey('raw',key)));
-    session.payload=payload;await persist(session);installBook(cloudDoc);revision=cipherToken(payload);
-    $('password').value='';render();showPage();await listen(credential.user);
+    session.payload=payload;await persist(session);installBook(cloudDoc);await restoreDraftCache(draftRecoveryKey);if(migrated)await flushDraftCache();revision=cipherToken(payload);
+    $('password').value='';$('recoveryPassword').value='';$('recoveryPassword').required=false;$('recoveryField').hidden=true;render();showPage();await listen(credential.user);if(migrated)tell('内容已恢复并用新密码重新加密。其他设备请退出后用新密码登录。');
   }catch(error){
     session=previous;key=previousKey;
     const messages={
@@ -292,7 +392,7 @@ $('loginForm').onsubmit=async event=>{
       'auth/invalid-api-key':'Firebase 配置有误，请核对 API Key。',
       'PERMISSION_DENIED':'请先发布数据库访问规则。'
     };
-    tell(messages[error.code] || (error.name==='OperationError'?'无法解密，请使用原密码。':'登录失败：'+error.message));
+    tell(messages[error.code] || (error.code?.startsWith('recovery/')?error.message:(error.name==='OperationError'?'无法解密，请检查原加密密码。':'登录失败：'+error.message)));
   }finally{$('login').disabled=false;}
 };
 async function boot(){
@@ -303,6 +403,7 @@ async function boot(){
       session={...stored,config:firebaseConfig};
       key=await crypto.subtle.importKey('raw',bytes(stored.key),'AES-GCM',true,['encrypt','decrypt']);
       if(stored.payload)installBook(await decrypt(stored.payload));
+      await restoreDraftCache();
       revision=cipherToken(stored.payload);render();showPage();
       await connect();
       if(auth.currentUser)await listen(auth.currentUser);else showLogin();
@@ -320,7 +421,7 @@ if('serviceWorker'in navigator){
   let refreshing=false;const controlledOnLoad=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
     if(!controlledOnLoad)return;
-    if(editing||drafts.size||busy||!$('cover').hidden){pendingReload=true;return;}
+    if(editing||drafts.size||busy||!$('loginForm').hidden||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
     if(!refreshing){refreshing=true;location.reload();}
   });
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(registration=>{
@@ -400,10 +501,10 @@ function enterTask(event){
   const tail=document.createRange();tail.setStart(range.startContainer,range.startOffset);tail.setEnd(text,text.childNodes.length);
   const next=taskRow(tail.extractContents());row.after(next);caretIn(next.querySelector('span'));
 }
-$('editor').addEventListener('keydown',event=>{if(event.key==='Enter')enterTask(event);});
+$('editor').addEventListener('keydown',event=>{if(event.key==='Enter')enterTask(event);else if(event.key==='Backspace'&&!event.isComposing){const row=currentTask();if(row&&!row.textContent.trim()){event.preventDefault();const block=document.createElement('div');block.append(document.createElement('br'));row.replaceWith(block);caretIn(block);}}});
 $('editor').addEventListener('beforeinput',event=>{if(event.inputType==='insertParagraph')enterTask(event);});
 function updateCheck(box){if(box.checked)box.setAttribute('checked','');else box.removeAttribute('checked');}
-$('editor').addEventListener('change',event=>{if(event.target.matches('input[type=checkbox]'))updateCheck(event.target);});
+$('editor').addEventListener('change',event=>{if(event.target.matches('input[type=checkbox]')){updateCheck(event.target);rememberCurrentDraft();scheduleDraftCache();}});
 $('reading').addEventListener('change',async event=>{
   const box=event.target;if(!box.matches('input[type=checkbox]'))return;
   if(busy){box.checked=!box.checked;return;}
@@ -450,7 +551,7 @@ document.addEventListener('pointerup',event=>{
 },{passive:false});
 document.addEventListener('dblclick',event=>{if(tapTarget(event.target)&&!event.target.closest('input,button')){event.preventDefault();toggleCover();}});
 
-$('editor').addEventListener('input',()=>{for(const row of $('editor').querySelectorAll('.todo-row')){if(!row.querySelector('input[type=checkbox]')||!row.querySelector('span'))row.classList.remove('todo-row');}});
+$('editor').addEventListener('input',()=>{normalizeFontSizes();for(const row of $('editor').querySelectorAll('.todo-row')){if(!row.querySelector('input[type=checkbox]')||!row.querySelector('span'))row.classList.remove('todo-row');}});
 
 $('date').onclick=async()=>{
   if(!session?.key||!auth)return;
@@ -462,7 +563,7 @@ $('date').onclick=async()=>{
     await api.signOut(auth);unsubscribe?.();unsubscribe=null;
     session=null;key=null;ref=null;revision=null;latest=null;received=false;connected=false;
     drafts.clear();book={pages:[emptyPage(),emptyPage(),emptyPage()]};pageIndex=0;doc=book.pages[0];
-    localStorage.removeItem(storageKey);await cachedPayload('delete');conflict=false;$('conflictActions').hidden=true;
+    clearTimeout(draftTimer);await draftQueue;localStorage.removeItem(storageKey);await cachedPayload('delete');await cachedPayload('delete',undefined,'drafts');conflict=false;$('conflictActions').hidden=true;
     $('title').value='';$('editor').replaceChildren();$('password').value='';
     mode(false);render();showLogin();$('email').value=email||'';status('');tell('');window.scrollTo(0,0);
   }catch(error){tell('退出失败：'+error.message);}
@@ -478,4 +579,9 @@ document.addEventListener('touchmove',event=>{
   if((window.scrollY<=0&&delta>0)||(window.scrollY>=bottom-1&&delta<0))event.preventDefault();
 },{passive:false});
 
-$('clearTitle').onclick=()=>{$('title').value='';};
+$('clearTitle').onclick=()=>{$('title').value='';rememberCurrentDraft();scheduleDraftCache();};
+
+document.addEventListener('selectionchange',()=>{if(pendingReload&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
+
+$('addTodo').addEventListener('click',()=>{rememberCurrentDraft();scheduleDraftCache();});
+$('editor').addEventListener('keydown',event=>{if(['Enter','Backspace'].includes(event.key))queueMicrotask(()=>{rememberCurrentDraft();scheduleDraftCache();});});

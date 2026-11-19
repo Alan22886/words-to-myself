@@ -18,3 +18,7 @@ html,body{overscroll-behavior-y:none}#date{font-size:13px;line-height:1.6}#edito
 .text-colors{display:inline-flex;gap:2px;align-items:center}.text-colors .color-dot{width:30px;height:32px;padding:8px;display:grid;place-items:center}.color-dot:before{content:"";display:block;width:12px;height:12px;border-radius:50%;background:var(--ink)}.color-dot.red{--ink:#ef7373}.color-dot.blue{--ink:#80b8ef}.color-dot.white{--ink:#e8e8e8}
 
 .title-field{display:flex;align-items:center;border:1px solid #333;border-radius:5px;padding:10px 12px;gap:8px;margin-bottom:20px}.title-field:focus-within{border-color:#777}.title-field #title{min-width:0;flex:1;margin:0;padding:0;font-size:26px;outline:none}.title-field #clearTitle{flex:none;width:30px;height:34px;padding:0;font-size:22px;color:#777;line-height:1}.title-field #clearTitle:hover{color:#ddd}#editor{border:1px solid #333;border-radius:5px;padding:14px;min-height:260px}#editor:focus{outline:none;border-color:#777}
+
+.page-meta{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:40px}.page-meta #date{order:0;margin:0;line-height:1.4}.page-meta .version{position:static;order:1;flex:none;line-height:1.4}.text-sizes{display:inline-flex;gap:2px}.text-sizes button{width:30px;padding:8px 0}html,body,#cover,#editor{scrollbar-width:none}html::-webkit-scrollbar,body::-webkit-scrollbar,#cover::-webkit-scrollbar,#editor::-webkit-scrollbar{display:none;width:0;height:0}
+
+#recoveryField{font-size:13px;color:#aaa;line-height:1.6}#recoveryField input{margin-top:4px}
