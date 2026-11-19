@@ -16,7 +16,7 @@ export async function deployPages(env, request=fetch, pause=ms=>new Promise(r=>s
   if(!response.ok){const detail=await response.json().catch(()=>({}));const fields=(detail.errors||[]).map(error=>error.field+':'+error.code).join(',');throw Error('Pages deployment request failed: '+response.status+' '+fields);}
   const deployment=await response.json();const id=deployment.id||env.GITHUB_SHA;
   const statusURL=deployment.status_url||api+'/'+encodeURIComponent(id);
-  if(!statusURL.startsWith(api+'/'))throw Error('Unexpected Pages status URL');
+  if(new URL(statusURL).origin!==new URL(api).origin)throw Error('Unexpected Pages status URL');
   const terminal=new Set(['deployment_failed','deployment_perms_error','deployment_content_failed','deployment_cancelled','deployment_lost']);
   for(let attempt=0;attempt<60;attempt++){
     await pause(5000);
