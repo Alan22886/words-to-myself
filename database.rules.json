@@ -8,10 +8,21 @@
           ".read": "auth != null && auth.uid === $uid",
           ".write": "auth != null && auth.uid === $uid",
           ".validate": "newData.hasChildren(['v', 'iv', 'data'])",
-          "v": { ".validate": "newData.val() === 1" },
-          "iv": { ".validate": "newData.isString() && newData.val().length === 16" },
-          "data": { ".validate": "newData.isString() && newData.val().length <= 2700000" },
-          "$other": { ".validate": false }
+          "v": {
+            ".validate": "newData.val() === 1 || newData.val() === 2"
+          },
+          "iv": {
+            ".validate": "newData.isString() && newData.val().length === 16"
+          },
+          "data": {
+            ".validate": "(newData.parent().child('v').val() === 1 && newData.isString() && newData.val().length <= 2700000) || (newData.parent().child('v').val() === 2 && newData.hasChildren(['0']))",
+            "$chunk": {
+              ".validate": "$chunk.matches(/^(?:[0-9]|1[0-3])$/) && newData.isString() && newData.val().length > 0 && newData.val().length <= 1000000"
+            }
+          },
+          "$other": {
+            ".validate": false
+          }
         }
       }
     }
