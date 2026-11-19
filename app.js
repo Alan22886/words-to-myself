@@ -544,15 +544,39 @@ $('reading').addEventListener('change',async event=>{
 });
 // Double tap without zoom. Ignore scrolling gestures and interactive controls.
 let lastTap=null, startTap=null, lastToggle=0, savedScroll=0;
+const idleDuration=2*60*1000;
+let idleTimer,lastActivity=Date.now();
+function armIdle(){
+  clearTimeout(idleTimer);
+  if(!$('cover').hidden)return;
+  idleTimer=setTimeout(()=>setCover(true),Math.max(0,idleDuration-(Date.now()-lastActivity)));
+}
+function setCover(show){
+  const cover=$('cover'),main=document.querySelector('main');
+  if(show===!cover.hidden){if(show)clearTimeout(idleTimer);return;}
+  if(show){
+    savedScroll=window.scrollY;document.activeElement?.blur();
+    if($('passwordDialog').open)$('passwordDialog').close();
+    rememberCurrentDraft();flushDraftCache();
+  }
+  cover.hidden=!show;main.inert=show;main.setAttribute('aria-hidden',String(show));document.body.classList.toggle('covered',show);
+  document.title=show?'The Evening Times':'给自己的话';getSelection()?.removeAllRanges();
+  if(show){cover.scrollTop=0;clearTimeout(idleTimer);}
+  else{lastActivity=Date.now();armIdle();window.scrollTo(0,savedScroll);if(pendingReload&&!editing&&!drafts.size&&!busy)location.reload();}
+}
 function toggleCover(){
   if(Date.now()-lastToggle<400)return;
-  lastToggle=Date.now();
-  const cover=$('cover'),show=cover.hidden;
-  if(show){savedScroll=window.scrollY;document.activeElement?.blur();}
-  cover.hidden=!show;document.body.classList.toggle('covered',show);
-  document.title=show?'The Evening Times':'给自己的话';getSelection()?.removeAllRanges();
-  if(show)cover.scrollTop=0;else{window.scrollTo(0,savedScroll);if(pendingReload&&!editing&&!drafts.size&&!busy)location.reload();}
+  lastToggle=Date.now();setCover($('cover').hidden);
 }
+function noteActivity(event){
+  if(!$('cover').hidden)return;
+  if(Date.now()-lastActivity>=idleDuration){setCover(true);event?.stopImmediatePropagation();return;}
+  lastActivity=Date.now();armIdle();
+}
+for(const name of ['pointerdown','keydown','input','wheel','touchstart','scroll'])document.addEventListener(name,noteActivity,{capture:true,passive:true});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')setCover(true);});
+window.addEventListener('pagehide',()=>setCover(true));
+window.addEventListener('pageshow',()=>setCover(true));
 function tapTarget(target){
   if(target.closest('#cover'))return true;
   if(editing||!$('loginForm').hidden||target.closest('#editing,button,input,label,[contenteditable],#conflictActions'))return false;

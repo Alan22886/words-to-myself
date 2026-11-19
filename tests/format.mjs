@@ -1,5 +1,6 @@
 import { chromium, webkit } from '@playwright/test';
 import assert from 'node:assert/strict';
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await (process.env.FORMAT_BROWSER==='webkit'?webkit:chromium).launch();
 try {
 const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});const page=await context.newPage();page.setDefaultTimeout(10000);page.on('pageerror',error=>console.error('PAGE',error.message));
@@ -21,7 +22,7 @@ export const get=async()=>({val:value});
 export const onValue=(path,fn)=>{queueMicrotask(()=>fn({val:()=>path==='.info/connected'?true:value()}));return ()=>{}};
 export const runTransaction=async(path,update)=>{const result=update(value());if(result!==undefined)localStorage.setItem('mock-cloud',JSON.stringify(result));return {committed:result!==undefined,snapshot:{val:value}}};
 `}));
-await page.goto('http://127.0.0.1:4181/');
+await page.goto('http://127.0.0.1:4181/');await reveal(page);
 await page.locator('#email').fill('me@example.com');await page.locator('#password').fill('wrong-password');await page.locator('#login').click();
 await page.getByRole('alert').filter({hasText:'邮箱或密码不正确'}).waitFor();
 await page.locator('#password').fill('test-password');await page.locator('#login').click();await Promise.race([page.locator('#edit').waitFor(),page.waitForFunction(()=>document.querySelector('#notice').textContent.length>0).then(async()=>{throw Error(await page.locator('#notice').textContent());})]);

@@ -1,5 +1,6 @@
 import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await chromium.launch();
 try {
 const page=await browser.newPage({viewport:{width:390,height:844}});
@@ -24,7 +25,7 @@ export const updatePassword=async(user,password)=>localStorage.setItem('mock-val
 export const onValue=(path,fn)=>{queueMicrotask(()=>fn({val:()=>path==='.info/connected'?true:value()}));return ()=>{}};
 export const runTransaction=async(path,update)=>{const result=update(value());if(result!==undefined)localStorage.setItem('mock-cloud',JSON.stringify(result));return {committed:result!==undefined,snapshot:{val:value}}};
 `}));
-await page.goto('http://127.0.0.1:4181/');
+await page.goto('http://127.0.0.1:4181/');await reveal(page);
 await page.locator('#email').fill('me@example.com');await page.locator('#password').fill('wrong-password');await page.locator('#login').click();
 await page.getByRole('alert').filter({hasText:'邮箱或密码不正确'}).waitFor();
 await page.locator('#password').fill('test-password');await page.locator('#login').click();await page.locator('#edit').waitFor();
@@ -33,7 +34,7 @@ await page.locator('#edit').click();await page.locator('#title').fill('记住这
 await page.waitForFunction(()=>!document.querySelector('#reading').hidden);
 const cloud=await page.evaluate(()=>localStorage.getItem('mock-cloud'));
 assert.ok(cloud);assert.ok(!cloud.includes('只有当前一页'));
-await page.reload();await page.waitForFunction(()=>document.querySelector('#reading').textContent.includes('只有当前一页'));
+await page.reload();await reveal(page);await page.waitForFunction(()=>document.querySelector('#reading').textContent.includes('只有当前一页'));
 assert.ok(await page.locator('#loginForm').isHidden());
 assert.equal(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor),'rgb(0, 0, 0)');
 assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));

@@ -1,5 +1,6 @@
 import { chromium } from '@playwright/test';
 import assert from 'node:assert/strict';
+async function reveal(page){await page.locator('#cover').waitFor();await page.locator('#cover').dblclick({position:{x:30,y:200}});await page.locator('#cover').waitFor({state:'hidden'});}
 const browser=await chromium.launch();
 let cloud=null;
 const pages=[];
@@ -39,7 +40,7 @@ async function newPage(){
   return {committed:true,value:cloud};
  });
  await page.route('https://www.gstatic.com/firebasejs/**',route=>route.fulfill({contentType:'text/javascript',body:sdk}));
- await page.goto('http://127.0.0.1:4181/');
+ await page.goto('http://127.0.0.1:4181/');await reveal(page);
  await page.locator('#email').fill('same@example.com');await page.locator('#password').fill('shared-password');await page.locator('#login').click();
  await page.locator('#edit').waitFor();await page.waitForFunction(()=>document.querySelector('#status').textContent==='已同步');return page;
 }
@@ -137,7 +138,7 @@ try{
  await b.locator('#save').click();await b.waitForFunction(()=>document.querySelector('#status').textContent==='已同步');
  assert.equal(cloud.v,2);assert.ok(Array.isArray(cloud.data));assert.ok(cloud.data.every(chunk=>chunk.length<=1000000));
  assert.ok((await b.evaluate(()=>localStorage.getItem('one-page:v1'))).length<2000);
- await b.reload();await b.locator('#edit').waitFor();await b.locator('[data-page="1"]').click();await reading(b,'large cached page');assert.ok((await b.locator('#reading img').getAttribute('src')).length>3000000);
+ await b.reload();await reveal(b);await b.locator('#edit').waitFor();await b.locator('[data-page="1"]').click();await reading(b,'large cached page');assert.ok((await b.locator('#reading img').getAttribute('src')).length>3000000);
  assert.ok((await b.locator('#date').innerText()).startsWith('保存于 '));assert.equal(await b.locator('#status svg').count(),1);
  const stored=JSON.stringify(cloud);await edit(b,'over capacity');
  await b.locator('#editor').evaluate(el=>{el.textContent='z'.repeat(10*1024*1024+1);el.style.display='none';});
