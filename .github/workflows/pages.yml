@@ -24,7 +24,12 @@ jobs:
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
+        id: upload
         with:
           path: dist
-      - uses: actions/deploy-pages@v4
+      - name: Deploy uploaded Pages artifact
         id: deployment
+        run: node scripts/deploy-pages.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ steps.upload.outputs.artifact_id }}
