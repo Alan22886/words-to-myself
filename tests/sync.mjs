@@ -51,7 +51,7 @@ try{
  const legacyKey=await crypto.subtle.deriveKey({name:'PBKDF2',salt:new TextEncoder().encode('one-page:v1:same-user'),iterations:600000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt']);
  const legacyIV=crypto.getRandomValues(new Uint8Array(12));const legacyBytes=await crypto.subtle.encrypt({name:'AES-GCM',iv:legacyIV},legacyKey,new TextEncoder().encode(JSON.stringify({title:'legacy page',html:'<p>old content retained</p>',updated:12345})));
  cloud={v:1,iv:Buffer.from(legacyIV).toString('base64'),data:Buffer.from(legacyBytes).toString('base64')};
- const a=await newPage(),b=await newPage();await reading(a,'old content retained');assert.equal(await a.locator('[data-page]').count(),3);
+ const a=await newPage(),b=await newPage();await reading(a,'old content retained');assert.equal(await a.locator('[data-page]').count(),4);
  await edit(a,'第一版');await a.locator('#editor').fill('今天认真做事');await a.locator('#addTodo').click();
  await a.keyboard.type('完成一个任务');await a.locator('#save').click();await reading(b,'完成一个任务');
  assert.ok(!JSON.stringify(cloud).includes('完成一个任务'));
@@ -107,7 +107,7 @@ try{
  assert.ok(await a.locator('#conflictActions').isHidden());assert.ok(await b.locator('#conflictActions').isHidden());
  await a.locator('[data-page="1"]').click();await reading(a,'page two');await b.locator('[data-page="0"]').click();await reading(b,'page one');
  // Exactly three slots and independent in-memory drafts.
- assert.equal(await a.locator('[data-page]').count(),3);
+ assert.equal(await a.locator('[data-page]').count(),4);
  await a.locator('[data-page="2"]').click();await edit(a,'third draft');await a.locator('#editor').fill('do not lose this');
  await a.locator('[data-page="0"]').click();await reading(a,'page one');await a.locator('[data-page="2"]').click();assert.equal(await a.locator('#title').inputValue(),'third draft');assert.equal(await a.locator('#editor').innerText(),'do not lose this');await a.locator('#save').click();
  await b.locator('[data-page="2"]').click();await reading(b,'third draft');

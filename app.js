@@ -1,20 +1,47 @@
+import { marked } from './vendor/marked.js';
 import { mountReader } from './reader.js';
 import { initBehaviorTools, changeLearningEntry } from './behavior.js';
 import { firebaseConfig } from './config.js';
+let markdownEditing=false,markdownBase,markdownIndex,markdownInitial,markdownPriorDraft;
 let behaviorTools;
 let positionReader=()=>{};
 const $ = id => document.getElementById(id);
 const storageKey = 'one-page:v1';
+const agentEntry=(()=>{try{const stored=JSON.parse(localStorage.getItem(storageKey)||'null');return new URLSearchParams(location.search).get('mode')==='agent'&&(!stored?.key||stored.mode==='agent');}catch{return false;}})();
+const privacyDisabled=()=>isAgent()||(!session?.key&&agentEntry);
 const contentLimit=10*1024*1024;
 const cipherToken=value=>value?.iv||null;
 const enc = new TextEncoder(), dec = new TextDecoder();
 const emptyPage=()=>({title:'',html:'',updated:0});
-let book={pages:[emptyPage(),emptyPage(),emptyPage()]},pageIndex=0;
+const emptyBook=()=>({pages:Array.from({length:4},emptyPage)});
+const isAgent=()=>session?.mode==='agent';
+const canEdit=index=>!!session?.key&&(!isAgent()||index===3);
+function markdownHTML(source){
+  const parsed=new DOMParser().parseFromString(marked.parse(source,{async:false,gfm:true,breaks:false}),'text/html');
+  // Use the existing task structure so Markdown tasks have the same Enter/Backspace behavior.
+  for(const item of [...parsed.querySelectorAll('li')].reverse()){
+    const checkbox=item.querySelector(':scope > input[type=checkbox],:scope > p > input[type=checkbox]');if(!checkbox)continue;
+    const row=parsed.createElement('div');row.className='todo-row';const text=parsed.createElement('span');text.className='todo-text';
+    checkbox.remove();if(item.children.length===1&&item.firstElementChild.tagName==='P')text.append(...item.firstElementChild.childNodes);else text.append(...item.childNodes);
+    row.append(checkbox,text);item.replaceWith(row);
+  }
+  for(const list of [...parsed.querySelectorAll('ul,ol')].reverse()){
+    if(!list.querySelector(':scope > div.todo-row'))continue;
+    const fragment=parsed.createDocumentFragment();let ordinary;
+    for(const child of [...list.childNodes]){
+      if(child.nodeType===1&&child.classList.contains('todo-row')){ordinary=undefined;fragment.append(child);}
+      else if(child.nodeType===1){if(!ordinary){ordinary=list.cloneNode(false);fragment.append(ordinary);}ordinary.append(child);}
+    }
+    list.replaceWith(fragment);
+  }
+  return sanitize(parsed.body.innerHTML);
+}
+let book=emptyBook(),pageIndex=0;
 let doc=book.pages[0],session,key,database,auth,ref,api,unsubscribe;
 const drafts=new Map();
-const readingPositions=[0,0,0];
+const readingPositions=[0,0,0,0];
 let draftTimer,draftQueue=Promise.resolve();
-const pageToken=page=>JSON.stringify([page.title,page.html,page.updated]);
+const pageToken=page=>JSON.stringify([page.title,page.html,page.updated,page.markdown??null]);
 function installBook(value){book=value;doc=book.pages[pageIndex];renderTabs();}
 
 let connected = false, received = false, pendingReload = false, quietSaving = false;
@@ -34,7 +61,7 @@ const status = message => {
 };
 function sanitize(html) {
   const source = new DOMParser().parseFromString(html, 'text/html');
-  const allowed = new Set(['P','BR','DIV','STRONG','B','EM','I','U','H2','UL','OL','LI','BLOCKQUOTE','IMG','INPUT','SPAN']);
+  const allowed = new Set(['P','BR','DIV','STRONG','B','EM','I','U','H2','UL','OL','LI','BLOCKQUOTE','IMG','INPUT','SPAN','H1','H3','H4','H5','H6','PRE','CODE','HR','DEL','A','TABLE','THEAD','TBODY','TR','TH','TD']);
   function clean(node) {
     if(node.nodeType === 3) return document.createTextNode(node.textContent);
     if(node.nodeType !== 1 || ['SCRIPT','STYLE','IFRAME','OBJECT','SVG','MATH'].includes(node.tagName)) return document.createTextNode('');
@@ -57,6 +84,8 @@ function sanitize(html) {
     const fontSize=node.style.fontSize||({2:'16px',3:'19px',5:'26px'}[node.getAttribute('size')]);
     if(['16px','19px','26px'].includes(fontSize))el.style.fontSize=fontSize;
     if(['bold','normal','400','700'].includes(node.style.fontWeight))el.style.fontWeight=node.style.fontWeight;
+    if(node.tagName==='A'){const href=node.getAttribute('href')||'';if(/^(https?:\/\/|mailto:)/i.test(href)){el.setAttribute('href',href);el.setAttribute('rel','noopener noreferrer');el.setAttribute('target','_blank');}}
+    if(node.tagName==='LI'&&node.querySelector(':scope > input[type=checkbox]'))el.classList.add('todo-row');
     if(['italic','normal'].includes(node.style.fontStyle))el.style.fontStyle=node.style.fontStyle;
     if(node.classList.contains('todo-row'))el.className='todo-row';
     if(node.classList.contains('todo-text'))el.className='todo-text';
@@ -80,7 +109,7 @@ function render() {
     const title=document.createElement('h1');title.textContent=doc.title;
     const body=document.createElement('div');body.className='body';body.innerHTML=sanitize(doc.html);if(doc.title)target.append(title);target.append(body);
   }
-  $('edit').textContent='编辑';renderTabs();renderDate();
+  $('edit').textContent='编辑';renderTabs();renderDate();applyAccess();
 }
 function mode(value) { editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value; }
 async function derive(password, uid) {
@@ -89,7 +118,7 @@ async function derive(password, uid) {
 }
 async function encrypt(value,cryptoKey=key,maxBytes=contentLimit) {
   const plaintext=enc.encode(JSON.stringify(value));
-  if(plaintext.byteLength>maxBytes)throw Error('三页内容合计超过 10 MB，请减少一些图片或文字。');
+  if(plaintext.byteLength>maxBytes)throw Error('四页内容合计超过 10 MB，请减少一些图片或文字。');
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ciphertext=await crypto.subtle.encrypt({name:'AES-GCM',iv},cryptoKey,plaintext);
   const data=b64(new Uint8Array(ciphertext));
@@ -105,11 +134,11 @@ async function decryptRaw(value,cryptoKey=key){
 async function decrypt(value,cryptoKey=key) {
   const valueDoc=await decryptRaw(value,cryptoKey);
   const pages=Array.isArray(valueDoc.pages)?valueDoc.pages:[valueDoc];
-  if(pages.length>3)throw Error('页面数量不正确');
-  return {pages:Array.from({length:3},(_,index)=>{
+  if(pages.length>4)throw Error('页面数量不正确');
+  return {pages:Array.from({length:4},(_,index)=>{
     const page=pages[index]||emptyPage();
     if(typeof page.title!=='string'||typeof page.html!=='string')throw Error('内容格式不正确');
-    return {title:page.title,html:sanitize(page.html),updated:Number(page.updated)||0};
+    return {title:page.title,html:sanitize(page.html),updated:Number(page.updated)||0,...(typeof page.markdown==='string'?{markdown:page.markdown}:{})};
   })};
 }
 let cacheDatabase;
@@ -138,6 +167,12 @@ async function persist(value){
 }
 function contentChanged(content,base){return content.title!==base.title||content.html!==base.html;}
 function rememberCurrentDraft(){
+  if(markdownEditing){
+    if(!canEdit(markdownIndex))return;
+    const markdown=$('markdownText').value,content={title:$('markdownTitle').value.trim(),html:markdownHTML(markdown),markdown,updated:Date.now()};
+    if(markdownDirty())drafts.set(markdownIndex,{content,base:markdownBase});else if(markdownPriorDraft)drafts.set(markdownIndex,markdownPriorDraft);else drafts.delete(markdownIndex);
+    renderTabs();return;
+  }
   if(!editing)return;
   const content=draft();
   if(contentChanged(content,doc))drafts.set(pageIndex,{content,base:doc});else drafts.delete(pageIndex);
@@ -162,7 +197,7 @@ async function restoreDraftCache(alternateKey){
   try{recovered=await decryptRaw(payload);}catch(error){if(!alternateKey)throw error;recovered=await decryptRaw(payload,alternateKey);}
   drafts.clear();
   for(const entry of recovered.drafts||[]){
-    if(!Number.isInteger(entry.index)||entry.index<0||entry.index>2)continue;
+    if(!Number.isInteger(entry.index)||entry.index<0||entry.index>3)continue;
     if(!entry.content||!entry.base)continue;
     for(const page of [entry.content,entry.base]){if(typeof page.title!=='string'||typeof page.html!=='string')throw Error('草稿格式不正确');page.html=sanitize(page.html);}
     drafts.set(entry.index,{content:entry.content,base:entry.base});
@@ -190,7 +225,7 @@ async function wrappingId(passwordKey){
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256',raw))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
 async function unlockContent(payload,passwordKey,uid){
-  if(!payload)return {key:passwordKey,doc:{pages:[emptyPage(),emptyPage(),emptyPage()]}};
+  if(!payload)return {key:passwordKey,doc:emptyBook()};
   try{return {key:passwordKey,doc:await decrypt(payload,passwordKey)};}catch(error){if(error.name!=='OperationError')throw error;}
   const box=(await api.get(api.ref(database,'pages/'+uid+'/keyWraps/'+await wrappingId(passwordKey)))).val();
   if(box){
@@ -222,7 +257,7 @@ function syncStatus() {
   else status(editing?'未保存':'已同步');
 }
 function flagConflict(value){
-  latest=value;conflict=true;$('conflictActions').hidden=false;
+  latest=value;conflict=true;$('conflictActions').hidden=markdownEditing||isAgent();
   tell('另一端已更新，当前修改已保留。请选择保留哪一份。');syncStatus();
 }
 async function acceptRemote(value){
@@ -231,7 +266,7 @@ async function acceptRemote(value){
   latest=value;received=true;
   if(busy)return;
   if(cipherToken(value)===revision){syncStatus();return;}
-  const incoming=value?await decrypt(value):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+  const incoming=value?await decrypt(value):emptyBook();
   if(session!==activeSession||cipherToken(latest)!==cipherToken(value))return;
   book=incoming;revision=cipherToken(value);session.payload=value;await persist(session);if(session!==activeSession)return;renderTabs();
   if(editing){
@@ -257,15 +292,16 @@ function renderTabs(){
     button.classList.toggle('has-draft',drafts.has(index));
     button.title=book.pages[index].title||`第 ${index+1} 页`;
   });
-  behaviorTools?.refreshRecords();
+  behaviorTools?.refreshRecords();applyAccess();
 }
 function switchPage(index){
+  if(!Number.isInteger(index)||index<0||index>3||markdownEditing)return;
   if(busy||index===pageIndex)return;
   if(!editing)readingPositions[pageIndex]=window.scrollY;
   else{rememberCurrentDraft();flushDraftCache();}
   pageIndex=index;conflict=false;$('conflictActions').hidden=true;tell('');
   const saved=drafts.get(index);
-  if(saved){
+  if(saved&&canEdit(index)&&!isAgent()){
     doc=saved.base;$('title').value=saved.content.title;$('editor').innerHTML=saved.content.html;mode(true);
     if(pageToken(book.pages[index])!==pageToken(doc))flagConflict(latest);
   }else{doc=book.pages[index];mode(false);render();}
@@ -277,7 +313,7 @@ function renderDate(){
 }
 renderDate();
 $('edit').onclick=()=>{
-  if(busy)return;
+  if(busy||isAgent()||!canEdit(pageIndex))return;
   readingPositions[pageIndex]=window.scrollY;
   const saved=drafts.get(pageIndex);doc=saved?.base||book.pages[pageIndex];
   $('title').value=(saved?.content||doc).title;$('editor').innerHTML=sanitize((saved?.content||doc).html);
@@ -290,9 +326,9 @@ $('cancel').onclick=()=>{
   drafts.delete(pageIndex);flushDraftCache();doc=book.pages[pageIndex];conflict=false;$('conflictActions').hidden=true;
   mode(false);render();syncStatus();tell('');window.scrollTo(0,readingPositions[pageIndex]);
 };
-async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
+async function savePage(next,expectedPage=pageToken(doc),inPlace=false,target=pageIndex){
+  if(!canEdit(target)){tell('AI 模式只能修改 Agent 页。');return false;}
   if(busy)return false;
-  const target=pageIndex;
   busy=true;quietSaving=inPlace;
   let quietProgress;
   if(inPlace)quietProgress=setTimeout(()=>{if(busy)status('同步中');},500);
@@ -302,7 +338,7 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
     let committedPayload,merged;
     for(let attempt=0;attempt<4;attempt++){
       const current=(await api.get(ref)).val();
-      const fresh=current?await decrypt(current):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+      const fresh=current?await decrypt(current):emptyBook();
       if(pageToken(fresh.pages[target])!==expectedPage){flagConflict(current);return false;}
       merged={pages:fresh.pages.map((page,index)=>index===target?next:page)};
       const payload=await encrypt(merged);
@@ -315,7 +351,7 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false){
     }
     if(!committedPayload)throw Error('另一端正在更新，请再点一次保存。');
     revision=cipherToken(committedPayload);session.payload=committedPayload;await persist(session);
-    book=merged;doc=next;drafts.delete(target);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;
+    book=merged;doc=book.pages[pageIndex];drafts.delete(target);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;
     if(!inPlace){mode(false);render();}else renderDate();tell('');
     if(pendingReload&&!drafts.size&&$('cover').hidden)location.reload();return true;
   }catch(error){tell(error.message);return false;}
@@ -334,16 +370,16 @@ $('useRemote').onclick=async()=>{
   if(busy||!confirm('放弃当前修改，使用另一端的内容？'))return;
   try{
     const value=(await api.get(ref)).val();
-    const incoming=value?await decrypt(value):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+    const incoming=value?await decrypt(value):emptyBook();
     installBook(incoming);drafts.delete(pageIndex);flushDraftCache();revision=cipherToken(value);latest=value;session.payload=value;await persist(session);
     conflict=false;$('conflictActions').hidden=true;mode(false);render();tell('');syncStatus();
   }catch(error){tell('读取失败：'+error.message);}
 };
 $('useMine').onclick=async()=>{
   if(busy||!confirm('用当前修改替换另一端的内容？'))return;
-  try{const remote=latest?await decrypt(latest):{pages:[emptyPage(),emptyPage(),emptyPage()]};await savePage(draft(),pageToken(remote.pages[pageIndex]));}catch(error){tell(error.message);}
+  try{const remote=latest?await decrypt(latest):emptyBook();await savePage(draft(),pageToken(remote.pages[pageIndex]));}catch(error){tell(error.message);}
 };
-$('clear').onclick=()=>{if(!confirm('清空这一页？保存后生效。'))return;if(!editing)$('edit').click();$('title').value='';$('editor').replaceChildren();rememberCurrentDraft();scheduleDraftCache();tell('');};
+$('clear').onclick=()=>{if(!canEdit(pageIndex))return;if(!confirm('清空这一页？保存后生效。'))return;if(!editing)$('edit').click();$('title').value='';$('editor').replaceChildren();rememberCurrentDraft();scheduleDraftCache();tell('');};
 function normalizeFontSizes(){for(const font of $('editor').querySelectorAll('font[size]')){font.style.fontSize={2:'16px',3:'19px',5:'26px'}[font.getAttribute('size')]||'19px';font.removeAttribute('size');}}
 document.querySelectorAll('[data-command]').forEach(button=>{
   button.onmousedown=event=>event.preventDefault();
@@ -374,17 +410,19 @@ $('image').onchange=async event=>{
     const canvas=document.createElement('canvas');canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();
     const img=document.createElement('img');img.src=canvas.toDataURL('image/jpeg',.8);img.alt='给自己的图片';
     const total=book.pages.reduce((size,page,index)=>size+(index===pageIndex?0:enc.encode(page.html).byteLength),0)+enc.encode($('editor').innerHTML).byteLength+img.src.length;
-    if(total>contentLimit-2048)throw Error('三页内容合计接近 10 MB，请先减少一些内容。');
+    if(total>contentLimit-2048)throw Error('四页内容合计接近 10 MB，请先减少一些内容。');
     $('editor').append(img,document.createElement('p'));rememberCurrentDraft();scheduleDraftCache();tell('');
   }catch(error){tell(error.message);}event.target.value='';
 };
-window.addEventListener('beforeunload',event=>{if((editing&&contentChanged(draft(),doc))||drafts.size){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(markdownDirty()||(editing&&contentChanged(draft(),doc))||drafts.size){event.preventDefault();event.returnValue='';}});
 function showLogin() {
+  $('loginMode').value=isAgent()||agentEntry?'agent':'human';
+  if(isAgent())setCover(false);
   $('date').disabled=true;$('accountSettings').disabled=true;$('date').textContent='未登录';
   $('loginForm').hidden=false;$('page').hidden=true;
   $('email').value=session?.email||'';
 }
-function showPage() {$('date').disabled=false;$('accountSettings').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;}
+function showPage() {applyAccess();if(isAgent()){pageIndex=3;doc=book.pages[3];render();setCover(false);}$('date').disabled=false;$('accountSettings').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;}
 $('loginForm').onsubmit=async event=>{
   event.preventDefault();$('login').disabled=true;tell('');
   rememberCurrentDraft();await flushDraftCache();
@@ -392,7 +430,7 @@ $('loginForm').onsubmit=async event=>{
   unsubscribe?.();unsubscribe=null;
   let migrated=false,draftRecoveryKey=previousKey;
   try {
-    session={config:firebaseConfig,email:$('email').value.trim()};
+    session={config:firebaseConfig,email:$('email').value.trim(),mode:$('loginMode').value==='agent'?'agent':'human'};
     await connect();
     const credential=await api.signInWithEmailAndPassword(auth,session.email,$('password').value);
     const passwordKey=await derive($('password').value,credential.user.uid);key=passwordKey;
@@ -440,7 +478,7 @@ async function boot(){
     const stored=JSON.parse(localStorage.getItem(storageKey)||'null');
     if(stored?.config && stored.key){
       if(!('payload' in stored))stored.payload=await cachedPayload('get');
-      session={...stored,config:firebaseConfig};
+      session={...stored,config:firebaseConfig,mode:stored.mode==='agent'?'agent':'human'};
       key=await crypto.subtle.importKey('raw',bytes(stored.key),'AES-GCM',true,['encrypt','decrypt']);
       if(stored.payload)installBook(await decrypt(stored.payload));
       await restoreDraftCache();
@@ -456,12 +494,12 @@ async function boot(){
     tell('暂时无法连接：'+error.message);
   }
 }
-render();boot();
+render();queueMicrotask(boot);
 if('serviceWorker'in navigator){
   let refreshing=false;const controlledOnLoad=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
     if(!controlledOnLoad)return;
-    if(editing||drafts.size||busy||!$('loginForm').hidden||$('passwordDialog').open||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
+    if(markdownEditing||editing||drafts.size||busy||!$('loginForm').hidden||$('passwordDialog').open||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
     if(!refreshing){refreshing=true;location.reload();}
   });
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(registration=>{
@@ -547,9 +585,9 @@ function updateCheck(box){if(box.checked)box.setAttribute('checked','');else box
 $('editor').addEventListener('change',event=>{if(event.target.matches('input[type=checkbox]')){updateCheck(event.target);rememberCurrentDraft();scheduleDraftCache();}});
 $('reading').addEventListener('change',async event=>{
   const box=event.target;if(!box.matches('input[type=checkbox]'))return;
-  if(busy){box.checked=!box.checked;return;}
+  if(busy||!canEdit(pageIndex)){box.checked=!box.checked;return;}
   updateCheck(box);
-  const next={...doc,html:sanitize($('reading').querySelector('.body').innerHTML),updated:Date.now()};
+  const next={...doc,html:sanitize($('reading').querySelector('.body').innerHTML),updated:Date.now()};delete next.markdown;
   const saved=await savePage(next,pageToken(doc),true);
   if(!saved){
     // The attempted change remains available for retry without swapping page layouts.
@@ -564,11 +602,13 @@ const idleDuration=2*60*1000;
 let idleTimer,lastActivity=Date.now();
 function armIdle(){
   clearTimeout(idleTimer);
+  if(privacyDisabled())return;
   if(!$('cover').hidden)return;
   idleTimer=setTimeout(()=>setCover(true),Math.max(0,idleDuration-(Date.now()-lastActivity)));
 }
 function setCover(show){
   const cover=$('cover'),main=document.querySelector('main');
+  if(show&&privacyDisabled())return;
   if(show===!cover.hidden){if(show){clearTimeout(idleTimer);positionReader();}return;}
   if(show){
     savedScroll=window.scrollY;document.activeElement?.blur();
@@ -585,6 +625,7 @@ function toggleCover(){
   lastToggle=Date.now();setCover($('cover').hidden);
 }
 function noteActivity(event){
+  if(privacyDisabled())return;
   if(!$('cover').hidden)return;
   if(Date.now()-lastActivity>=idleDuration){setCover(true);event?.stopImmediatePropagation();return;}
   lastActivity=Date.now();armIdle();
@@ -594,8 +635,9 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 window.addEventListener('pagehide',()=>setCover(true));
 window.addEventListener('pageshow',()=>setCover(true));
 function tapTarget(target){
+  if(privacyDisabled())return false;
   if(target.closest('#cover'))return true;
-  if(editing||!$('loginForm').hidden||target.closest('#editing,button,input,label,[contenteditable],#conflictActions'))return false;
+  if(markdownEditing||editing||!$('loginForm').hidden||target.closest('#editing,button,input,label,[contenteditable],#conflictActions'))return false;
   return true;
 }
 document.addEventListener('pointerdown',event=>{
@@ -623,16 +665,16 @@ $('editor').addEventListener('input',()=>{normalizeFontSizes();for(const row of 
 $('date').onclick=async()=>{
   if(!session?.key||!auth)return;
   if(busy){tell('正在保存，请稍候。');return;}
-  const warning=editing||drafts.size?'有未保存的修改。退出会丢弃草稿，云端内容保留。退出登录？':'退出此设备？云端内容保留。';
+  const warning=markdownDirty()||editing||drafts.size?'有未保存的修改。退出会丢弃草稿，云端内容保留。退出登录？':'退出此设备？云端内容保留。';
   if(!confirm(warning))return;
   try{
     const email=session.email;
     await api.signOut(auth);unsubscribe?.();unsubscribe=null;
     session=null;key=null;ref=null;revision=null;latest=null;received=false;connected=false;
-    drafts.clear();book={pages:[emptyPage(),emptyPage(),emptyPage()]};pageIndex=0;doc=book.pages[0];
+    drafts.clear();book=emptyBook();pageIndex=0;doc=book.pages[0];
     clearTimeout(draftTimer);await draftQueue;localStorage.removeItem(storageKey);await cachedPayload('delete');await cachedPayload('delete',undefined,'drafts');await cachedPayload('delete',undefined,'behavior');conflict=false;$('conflictActions').hidden=true;
     $('title').value='';$('editor').replaceChildren();$('password').value='';
-    mode(false);render();showLogin();$('email').value=email||'';status('');tell('');window.scrollTo(0,0);
+    closeMarkdown();mode(false);render();showLogin();$('email').value=email||'';status('');tell('');window.scrollTo(0,0);
   }catch(error){tell('退出失败：'+error.message);}
 };
 
@@ -646,7 +688,7 @@ document.addEventListener('touchmove',event=>{
   if((window.scrollY<=0&&delta>0)||(window.scrollY>=bottom-1&&delta<0))event.preventDefault();
 },{passive:false});
 
-$('clearTitle').onclick=()=>{$('title').value='';rememberCurrentDraft();scheduleDraftCache();};
+$('clearTitle').onclick=()=>{if(!canEdit(pageIndex))return;$('title').value='';rememberCurrentDraft();scheduleDraftCache();};
 
 document.addEventListener('selectionchange',()=>{if(pendingReload&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&!$('passwordDialog').open&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
 
@@ -655,7 +697,7 @@ $('editor').addEventListener('keydown',event=>{if(['Enter','Backspace'].includes
 
 $('accountSettings').onclick=()=>{
   if(!session?.key||!auth?.currentUser){tell('请先登录。');return;}
-  if(busy)return;
+  if(busy||isAgent())return;
   $('passwordChangeForm').reset();$('currentPasswordField').hidden=true;$('currentPassword').required=false;$('passwordChangeNotice').textContent='';$('passwordDialog').showModal();
 };
 $('closePasswordDialog').onclick=()=>{if(!$('changePassword').disabled)$('passwordDialog').close();};
@@ -693,12 +735,13 @@ $('passwordDialog').addEventListener('cancel',event=>{if($('changePassword').dis
 // Small action tools live outside the editor/sync/cover implementation.
 let chosenBehaviorTask;
 function insertBehaviorNodes(nodes){
-  if(!session?.key)throw Error('请先登录。');
+  if(!canEdit(pageIndex))throw Error('AI 模式只能修改 Agent 页。');
   if(busy)throw Error('正在保存，请稍后再试。');
   if(!editing)$('edit').click();
   $('editor').append(...nodes);rememberCurrentDraft();scheduleDraftCache();
 }
 async function changeLearningPage(change){
+  if(isAgent())throw Error('AI 模式不能修改前三页或学习记录。');
   if(busy)throw Error('正在保存，请稍后再试。');
   if(!session?.key||!navigator.onLine||!connected||!received)throw Error('请联网并登录后再保存记录；输入会留在本机。');
   if(drafts.has(1)||(editing&&pageIndex===1&&contentChanged(draft(),doc)))throw Error('第二页有未保存修改，请先保存或取消，再记这一句。');
@@ -706,7 +749,7 @@ async function changeLearningPage(change){
   try{
     let payload,merged;
     for(let attempt=0;attempt<4;attempt++){
-      const current=(await api.get(ref)).val(),fresh=current?await decrypt(current):{pages:[emptyPage(),emptyPage(),emptyPage()]};
+      const current=(await api.get(ref)).val(),fresh=current?await decrypt(current):emptyBook();
       const changed={...fresh.pages[1],html:sanitize(changeLearningEntry(fresh.pages[1].html,change)),updated:Date.now()};
       merged={pages:fresh.pages.map((page,index)=>index===1?changed:page)};
       const next=await encrypt(merged),expected=cipherToken(current);
@@ -724,7 +767,7 @@ async function changeLearningPage(change){
   }
 }
 behaviorTools=initBehaviorTools({
-  ready:()=>!!session?.key&&$('loginForm').hidden,
+  ready:()=>!!session?.key&&!isAgent()&&$('loginForm').hidden,
   owner:()=>session?.key?session:undefined,
   currentPage:()=>pageIndex,
   chooseTask:row=>{chosenBehaviorTask=row;},
@@ -747,3 +790,72 @@ behaviorTools=initBehaviorTools({
 });
 
 positionReader=mountReader($('cover'));positionReader();
+
+function applyAccess(){
+  const allowed=canEdit(pageIndex);
+  $('edit').hidden=isAgent()||editing||markdownEditing||!allowed;
+  $('markdownButton').hidden=editing||markdownEditing||!session?.key;
+  $('behaviorStart').hidden=isAgent();$('behaviorMore').hidden=isAgent();
+  $('accountSettings').disabled=isAgent()||!session?.key;
+  $('accountSettings').title=isAgent()?'AI 模式 · 退出后可重新选择':'点击修改密码';
+  $('reading').querySelectorAll('input[type=checkbox]').forEach(box=>box.disabled=!allowed||isAgent());
+}
+function markdownDirty(){return markdownEditing&&($('markdownText').value!==markdownInitial.markdown||$('markdownTitle').value!==markdownInitial.title);}
+function closeMarkdown(){markdownEditing=false;$('markdownText').value='';$('markdownTitle').value='';markdownBase=undefined;markdownPriorDraft=undefined;$('markdownPanel').hidden=true;$('page').hidden=!session?.key;applyAccess();}
+$('markdownButton').onclick=()=>{
+  if(busy||editing||markdownEditing)return;
+  markdownIndex=pageIndex;markdownBase=doc;markdownEditing=true;
+  markdownPriorDraft=drafts.get(pageIndex);const local=markdownPriorDraft?.content;
+  markdownInitial={title:(local||doc).title,markdown:local?.markdown??local?.html??doc.markdown??doc.html};
+  $('markdownTitle').value=markdownInitial.title;$('markdownText').value=markdownInitial.markdown;
+  const allowed=canEdit(pageIndex);$('markdownTitle').readOnly=!allowed;$('markdownText').readOnly=!allowed;$('markdownSave').hidden=!allowed;
+  $('markdownHint').textContent=allowed?'Markdown · 保存后替换当前页；原有富文本可保留为 HTML。':'只读 · AI 只能修改 Agent 页。';
+  $('markdownNotice').textContent='';$('markdownReload').hidden=true;$('page').hidden=true;$('markdownPanel').hidden=false;applyAccess();
+};
+$('markdownCancel').onclick=()=>{if(markdownDirty()&&!confirm('放弃尚未保存的 Markdown 修改？'))return;if(markdownPriorDraft)drafts.set(markdownIndex,markdownPriorDraft);else drafts.delete(markdownIndex);flushDraftCache();closeMarkdown();renderTabs();};
+for(const id of ['markdownText','markdownTitle'])$(id).addEventListener('input',()=>{rememberCurrentDraft();scheduleDraftCache();});
+$('markdownSave').onclick=async()=>{
+  if(!canEdit(markdownIndex)||busy)return;
+  $('markdownSave').disabled=true;
+  try{
+    const markdown=$('markdownText').value,next={title:$('markdownTitle').value.trim(),html:markdownHTML(markdown),markdown,updated:Date.now()};
+    const saved=await savePage(next,pageToken(markdownBase),false,markdownIndex);
+    if(saved)closeMarkdown();else{ $('conflictActions').hidden=true;$('markdownNotice').textContent=$('notice').textContent||'保存未完成，输入已保留。';$('markdownReload').hidden=!conflict;}
+  }catch(error){$('markdownNotice').textContent=error.message;}finally{$('markdownSave').disabled=false;}
+};
+const contentRevision=async page=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(pageToken(page))))].map(x=>x.toString(16).padStart(2,'0')).join('');
+function requireAgentReady(){if(!session?.key||!isAgent()||!$('loginForm').hidden)throw Error('请先使用 AI Agent 模式登录。');if(!received||!connected||!navigator.onLine)throw Error('同步未就绪，请联网后重试。');}
+Object.defineProperty(window,'word2myself',{value:Object.freeze({
+  version:1,
+  status:()=>({ready:!!session?.key&&$('loginForm').hidden&&received&&connected,mode:session?.mode||null,writablePages:isAgent()?['Agent']:[],busy}),
+  async read(){
+    requireAgentReady();const owner=session,value=(await api.get(ref)).val(),snapshot=value?await decrypt(value):emptyBook();
+    if(owner!==session)throw Error('登录已改变。');
+    return {pages:await Promise.all(snapshot.pages.map(async(page,index)=>({id:index===3?'Agent':String(index+1).padStart(2,'0'),title:page.title,html:page.html,markdown:page.markdown??page.html,updated:page.updated,revision:await contentRevision(page),writable:index===3}))) };
+  },
+  async write({page='Agent',title,markdown,expectedRevision}={}){
+    requireAgentReady();if(page!=='Agent')throw Error('AI 只能修改 Agent 页。');
+    if(typeof markdown!=='string'||typeof title!=='string'||title.length>100||typeof expectedRevision!=='string')throw Error('需要 title、markdown 和读取时的 expectedRevision。');
+    if(busy||editing||markdownEditing||drafts.has(3))throw Error('存在编辑或保存，请先完成当前操作。');
+    const owner=session,current=(await api.get(ref)).val(),fresh=current?await decrypt(current):emptyBook();
+    if(owner!==session)throw Error('登录已改变。');
+    if(await contentRevision(fresh.pages[3])!==expectedRevision)throw Error('Agent 页已更新，请重新读取并合并后再写。');
+    const next={title,html:markdownHTML(markdown),markdown,updated:Date.now()};
+    if(!await savePage(next,pageToken(fresh.pages[3]),false,3))throw Error($('notice').textContent||'保存失败，请重新读取。');
+    return {saved:true,page:'Agent',revision:await contentRevision(next)};
+  }
+}),writable:false,configurable:false});
+if(agentEntry){
+  $('loginMode').value='agent';if(!session?.key){$('cover').hidden=true;document.querySelector('main').inert=false;document.querySelector('main').setAttribute('aria-hidden','false');document.body.classList.remove('covered');document.title='word 2 myself';}
+}
+
+$('markdownReload').onclick=async()=>{
+  if(busy||!confirm('用最新云端内容替换当前 Markdown 输入？未保存输入会丢弃。'))return;
+  try{
+    const owner=session,payload=(await api.get(ref)).val(),fresh=payload?await decrypt(payload):emptyBook();
+    if(owner!==session)throw Error('登录已改变。');
+    const page=fresh.pages[markdownIndex];markdownBase=page;markdownPriorDraft=undefined;
+    markdownInitial={title:page.title,markdown:page.markdown??page.html};$('markdownTitle').value=markdownInitial.title;$('markdownText').value=markdownInitial.markdown;
+    drafts.delete(markdownIndex);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;$('markdownReload').hidden=true;$('markdownNotice').textContent='';tell('');renderTabs();syncStatus();
+  }catch(error){$('markdownNotice').textContent=error.message;}
+};
