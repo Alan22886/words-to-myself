@@ -4,13 +4,14 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node tests/login.mjs && node tests/sync.mjs && node tests/format.mjs && node tests/recovery.mjs && node tests/drafts.mjs && node tests/password-change.mjs && node tests/key-refresh.mjs && node tests/privacy.mjs && node tests/behavior.mjs && node tests/reader.mjs && node tests/agent.mjs && node tests/deploy.mjs",
-    "test:webkit": "FORMAT_BROWSER=webkit node tests/format.mjs && PRIVACY_BROWSER=webkit node tests/privacy.mjs && BEHAVIOR_BROWSER=webkit node tests/behavior.mjs && READER_BROWSER=webkit node tests/reader.mjs && AGENT_BROWSER=webkit node tests/agent.mjs"
+    "test": "node tests/login.mjs && node tests/sync.mjs && node tests/format.mjs && node tests/recovery.mjs && node tests/drafts.mjs && node tests/password-change.mjs && node tests/key-refresh.mjs && node tests/privacy.mjs && node tests/behavior.mjs && node tests/reader.mjs && node tests/agent.mjs && node tests/reading-edit.mjs && node tests/deploy.mjs",
+    "test:webkit": "FORMAT_BROWSER=webkit node tests/format.mjs && PRIVACY_BROWSER=webkit node tests/privacy.mjs && BEHAVIOR_BROWSER=webkit node tests/behavior.mjs && READER_BROWSER=webkit node tests/reader.mjs && AGENT_BROWSER=webkit node tests/agent.mjs && EDIT_BROWSER=webkit node tests/reading-edit.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1"
   },
   "dependencies": {
     "marked": "18.2.1"
-  }
+  },
+  "version": "14.1.0"
 }

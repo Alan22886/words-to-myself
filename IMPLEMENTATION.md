@@ -52,3 +52,11 @@
 Markdown 使用固定的 marked 18.2.1，源码与许可证内置于 vendor；解析结果继续通过白名单清洗。支持 Markdown 文档结构；远程图片、脚本、事件和危险链接被过滤。输入仍使用原加密草稿机制，同页冲突保留输入，显式“重新读取”前确认。
 
 图标改为黑底纸页与引号，重新生成 SVG / PWA PNG / Apple touch icon。
+
+## 14.1
+
+阅读放大仅作用于 #reading 中的文字：渲染后记录每个节点原有计算字号，通过局部 CSS 变量等比例显示；不修改正文原有字号，不改变图片及界面控件，临时属性会被原有 sanitizer 移除。偏好存于本机 `one-page:reading-size`，无新增云端数据。
+
+`multi-selection.js` 通过 Command/Ctrl 拖选累积 Range，在 DOM 外绘制选区。格式命令逐处执行，并用文字偏移重建范围以跨越 execCommand 的 DOM 包装变化；只支持行内格式，不为编辑器引入分区或多个光标。结构类工具在多选时禁用，原单选逻辑保留。
+
+普通编辑区识别 Markdown 源码或安全富文本粘贴，复用 marked 与白名单 sanitizer；不增加外部服务。发布显示号固定来自 package.json（本版 14.1），service worker 仍包含内容摘要，保证同版本资源一致更新。

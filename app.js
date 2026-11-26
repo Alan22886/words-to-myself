@@ -1,14 +1,16 @@
+import { multiSelection } from './multi-selection.js';
 import { marked } from './vendor/marked.js';
 import { mountReader } from './reader.js';
 import { initBehaviorTools, changeLearningEntry } from './behavior.js';
 import { firebaseConfig } from './config.js';
 let markdownEditing=false,markdownBase,markdownIndex,markdownInitial,markdownPriorDraft;
-let behaviorTools;
+let behaviorTools,multipleText;
 let positionReader=()=>{};
 const $ = id => document.getElementById(id);
 const storageKey = 'one-page:v1';
 const agentEntry=(()=>{try{const stored=JSON.parse(localStorage.getItem(storageKey)||'null');return new URLSearchParams(location.search).get('mode')==='agent'&&(!stored?.key||stored.mode==='agent');}catch{return false;}})();
 const privacyDisabled=()=>isAgent()||(!session?.key&&agentEntry);
+const readingSteps=[.85,1,1.15,1.3,1.5,1.75,2];
 const contentLimit=10*1024*1024;
 const cipherToken=value=>value?.iv||null;
 const enc = new TextEncoder(), dec = new TextDecoder();
@@ -109,9 +111,9 @@ function render() {
     const title=document.createElement('h1');title.textContent=doc.title;
     const body=document.createElement('div');body.className='body';body.innerHTML=sanitize(doc.html);if(doc.title)target.append(title);target.append(body);
   }
-  $('edit').textContent='编辑';renderTabs();renderDate();applyAccess();
+  applyReadingSize();$('edit').textContent='编辑';renderTabs();renderDate();applyAccess();
 }
-function mode(value) { editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value; }
+function mode(value) { multipleText?.clear();editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value;applyAccess(); }
 async function derive(password, uid) {
   const material=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode('one-page:v1:'+uid),iterations:600000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -385,6 +387,7 @@ document.querySelectorAll('[data-command]').forEach(button=>{
   button.onmousedown=event=>event.preventDefault();
   button.onclick=()=>{
     const editor=$('editor'),selection=getSelection();
+    if(multipleText.apply(button.dataset.command,button.dataset.value)){normalizeFontSizes();rememberCurrentDraft();scheduleDraftCache();return;}
     const selected=selection?.rangeCount&&!selection.isCollapsed&&editor.contains(selection.getRangeAt(0).commonAncestorContainer);
     editor.focus({preventScroll:true});
     if(button.dataset.command==='removeFormat'&&!selected){
@@ -400,7 +403,30 @@ document.querySelectorAll('[data-command]').forEach(button=>{
     rememberCurrentDraft();scheduleDraftCache();
   };
 });
-$('editor').addEventListener('paste',event=>{event.preventDefault();document.execCommand('insertText',false,event.clipboardData.getData('text/plain'));});
+multipleText=multiSelection($('editor'));
+$('editor').addEventListener('keydown',event=>{const command={b:'bold',i:'italic'}[event.key.toLowerCase()];if(command&&(event.metaKey||event.ctrlKey)&&multipleText.apply(command)){event.preventDefault();normalizeFontSizes();rememberCurrentDraft();scheduleDraftCache();}});
+let plainPasteUntil=0;
+$('editor').addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.shiftKey&&event.key.toLowerCase()==='v')plainPasteUntil=Date.now()+1000;});
+function looksLikeMarkdown(text){
+  const block=new Set(['heading','list','blockquote','code','table','hr']);
+  const inline=new Set(['strong','em','del','link','codespan']);
+  return marked.lexer(text).some(token=>block.has(token.type)||token.tokens?.some(part=>inline.has(part.type)));
+}
+$('editor').addEventListener('paste',event=>{
+  event.preventDefault();multipleText.clear();const editor=$('editor'),text=event.clipboardData?.getData('text/plain')||'',rich=event.clipboardData?.getData('text/html')||'';
+  let html=null;
+  if(Date.now()>=plainPasteUntil&&looksLikeMarkdown(text))html=markdownHTML(text);
+  else if(Date.now()>=plainPasteUntil&&/<(?:h[1-6]|strong|b|em|i|ul|ol|li|blockquote|pre|code|table|a)\b/i.test(rich))html=sanitize(rich);
+  const range=getSelection()?.rangeCount?getSelection().getRangeAt(0):null;
+  const special='img,input,hr,table';
+  const replaceAll=range&&!range.collapsed&&editor.contains(range.commonAncestorContainer)&&range.toString()===editor.textContent&&range.cloneContents().querySelectorAll(special).length===editor.querySelectorAll(special).length;
+  if(replaceAll){
+    // Drop the old enclosing heading/list using native editing operations before inserting blocks.
+    document.execCommand('formatBlock',false,'div');
+  }
+  document.execCommand(html===null?'insertText':'insertHTML',false,html===null?text:html);
+  plainPasteUntil=0;rememberCurrentDraft();scheduleDraftCache();
+});
 $('editor').addEventListener('drop',event=>event.preventDefault());
 $('image').onchange=async event=>{
   const file=event.target.files[0];if(!file)return;
@@ -419,10 +445,10 @@ function showLogin() {
   $('loginMode').value=isAgent()||agentEntry?'agent':'human';
   if(isAgent())setCover(false);
   $('date').disabled=true;$('accountSettings').disabled=true;$('date').textContent='未登录';
-  $('loginForm').hidden=false;$('page').hidden=true;
+  $('loginForm').hidden=false;$('page').hidden=true;applyAccess();
   $('email').value=session?.email||'';
 }
-function showPage() {applyAccess();if(isAgent()){pageIndex=3;doc=book.pages[3];render();setCover(false);}$('date').disabled=false;$('accountSettings').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;}
+function showPage() {applyAccess();if(isAgent()){pageIndex=3;doc=book.pages[3];render();setCover(false);}$('date').disabled=false;$('accountSettings').disabled=false;$('loginForm').hidden=true;$('page').hidden=false;applyAccess();}
 $('loginForm').onsubmit=async event=>{
   event.preventDefault();$('login').disabled=true;tell('');
   rememberCurrentDraft();await flushDraftCache();
@@ -793,6 +819,7 @@ positionReader=mountReader($('cover'));positionReader();
 
 function applyAccess(){
   const allowed=canEdit(pageIndex);
+  $('readingSize').hidden=!session?.key||!$('loginForm').hidden||editing||markdownEditing;
   $('edit').hidden=isAgent()||editing||markdownEditing||!allowed;
   $('markdownButton').hidden=editing||markdownEditing||!session?.key;
   $('behaviorStart').hidden=isAgent();$('behaviorMore').hidden=isAgent();
@@ -858,4 +885,20 @@ $('markdownReload').onclick=async()=>{
     markdownInitial={title:page.title,markdown:page.markdown??page.html};$('markdownTitle').value=markdownInitial.title;$('markdownText').value=markdownInitial.markdown;
     drafts.delete(markdownIndex);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;$('markdownReload').hidden=true;$('markdownNotice').textContent='';tell('');renderTabs();syncStatus();
   }catch(error){$('markdownNotice').textContent=error.message;}
+};
+
+
+function readingScale(){try{const saved=Number(localStorage.getItem('one-page:reading-size'));return readingSteps.includes(saved)?saved:1;}catch{return 1;}}
+function applyReadingSize(){
+  const root=$('reading'),scale=readingScale();
+  const fresh=[...root.querySelectorAll('*:not([data-read-sized])')].map(node=>[node,getComputedStyle(node).fontSize]);
+  for(const [node,size] of fresh){node.style.setProperty('--read-base',size);node.setAttribute('data-read-sized','');}
+  root.style.setProperty('--read-scale',scale);
+  $('readingSmaller').disabled=scale===readingSteps[0];$('readingLarger').disabled=scale===readingSteps.at(-1);
+  $('readingSize').title='阅读字号 '+Math.round(scale*100)+'%';
+}
+for(const [id,delta] of [['readingSmaller',-1],['readingLarger',1]])$(id).onclick=()=>{
+  const index=readingSteps.indexOf(readingScale()),next=readingSteps[Math.max(0,Math.min(readingSteps.length-1,index+delta))];
+  try{localStorage.setItem('one-page:reading-size',String(next));}catch{}
+  applyReadingSize();
 };

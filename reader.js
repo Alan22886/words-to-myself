@@ -93,7 +93,7 @@ export const readerSections = [
 ];
 
 export function mountReader(root){
-  const version=root.querySelector('.version')?.textContent||'beta.dev';
+  const version=root.querySelector('.version')?.textContent||'app.dev';
   const shell=document.createElement('div');shell.className='news-shell';
   const header=document.createElement('header');header.className='news-header';header.textContent='The Evening Times';
   const strap=document.createElement('span');strap.textContent='Small stories · Everyday life';header.append(strap);
@@ -103,7 +103,7 @@ export function mountReader(root){
   const entries=document.createElement('div');entries.id='readerSections';
   readerSections.forEach(([name,...paragraphs],index)=>{const section=document.createElement('section');section.className='reader-section';section.dataset.readerSection=String(index);const heading=document.createElement('h2');heading.textContent=name;section.append(heading);for(const words of paragraphs){const paragraph=document.createElement('p');paragraph.textContent=words;section.append(paragraph);}entries.append(section);});
   shell.append(header,category,title,intro,entries);
-  const badge=document.createElement('span');badge.className='version reader-badge';badge.setAttribute('aria-label','测试版本');badge.textContent=version;root.replaceChildren(shell,badge);
+  const badge=document.createElement('span');badge.className='version reader-badge';badge.setAttribute('aria-label','版本');badge.textContent=version;root.replaceChildren(shell,badge);
   let last=-1;try{const stored=Number(sessionStorage.getItem('word-2-myself:reader'));if(Number.isInteger(stored)&&stored>=0&&stored<readerSections.length)last=stored;}catch{}
   return ()=>{
     const count=readerSections.length,exclude=last>=0&&last<count;let index=crypto.getRandomValues(new Uint32Array(1))[0]%(count-(exclude?1:0));if(exclude&&index>=last)index++;
