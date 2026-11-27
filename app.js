@@ -832,6 +832,7 @@ function applyAccess(){
   $('accountSettings').title=isAgent()?'AI 模式 · 退出后可重新选择':editing||markdownEditing?'编辑时已暂停自动遮挡；单击修改密码':privacyHeld?'自动遮挡已暂停；长按恢复，单击修改密码':'长按暂停自动遮挡；单击修改密码';
   $('accountSettings').dataset.privacyHeld=String(privacyHeld);
   $('accountSettings').setAttribute('aria-pressed',String(privacyHeld));
+  updateFloatingVersion(true);
   $('reading').querySelectorAll('input[type=checkbox]').forEach(box=>box.disabled=!allowed||isAgent());
 }
 function markdownDirty(){return markdownEditing&&($('markdownText').value!==markdownInitial.markdown||$('markdownTitle').value!==markdownInitial.title);}
@@ -970,3 +971,12 @@ $('accountSettings').addEventListener('keydown',event=>{if(event.key===' '&&!eve
 $('accountSettings').addEventListener('keyup',event=>{if(event.key===' '){if(versionPress&&(versionPress.fired||Date.now()-versionPress.at>=650)){event.preventDefault();suppressVersionClickUntil=Date.now()+800;}cancelVersionPress();}});
 addEventListener('blur',cancelVersionPress);
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')cancelVersionPress();});
+
+function updateFloatingVersion(force=false){
+  const button=$('accountSettings'),floating=!!session?.key&&!isAgent()&&!editing&&!markdownEditing&&$('loginForm').hidden&&!$('readingSize').hidden&&window.scrollY>24;
+  if(!force&&button.dataset.floatingLock===String(floating))return;
+  button.dataset.floatingLock=String(floating);
+  const state=privacyHeld?'自动新闻遮挡已暂停':'自动新闻遮挡已启用';
+  button.setAttribute('aria-label',(floating?'锁头':('版本 '+button.querySelector('.version-number').textContent))+'，'+state+'；长按切换，单击修改密码');
+}
+addEventListener('scroll',()=>updateFloatingVersion(),{passive:true});
