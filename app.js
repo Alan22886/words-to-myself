@@ -5,6 +5,7 @@ import { initBehaviorTools, changeLearningEntry } from './behavior.js';
 import { firebaseConfig } from './config.js';
 let markdownEditing=false,markdownBase,markdownIndex,markdownInitial,markdownPriorDraft;
 let behaviorTools,multipleText;
+let privacyHeld=false,versionPress=null,versionHoldTimer,suppressVersionClickUntil=0;
 let positionReader=()=>{};
 const $ = id => document.getElementById(id);
 const storageKey = 'one-page:v1';
@@ -113,7 +114,7 @@ function render() {
   }
   applyReadingSize();$('edit').textContent='编辑';renderTabs();renderDate();applyAccess();
 }
-function mode(value) { multipleText?.clear();editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value;applyAccess(); }
+function mode(value) { multipleText?.clear();editing=value; $('clear').hidden=!value; $('editing').hidden=!value; $('reading').hidden=value; $('save').hidden=!value; $('edit').hidden=value; $('cancel').hidden=!value;applyAccess();resetPrivacyIdle(); }
 async function derive(password, uid) {
   const material=await crypto.subtle.importKey('raw',enc.encode(password),'PBKDF2',false,['deriveKey']);
   return crypto.subtle.deriveKey({name:'PBKDF2',salt:enc.encode('one-page:v1:'+uid),iterations:600000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},true,['encrypt','decrypt']);
@@ -355,7 +356,7 @@ async function savePage(next,expectedPage=pageToken(doc),inPlace=false,target=pa
     revision=cipherToken(committedPayload);session.payload=committedPayload;await persist(session);
     book=merged;doc=book.pages[pageIndex];drafts.delete(target);await flushDraftCache();conflict=false;$('conflictActions').hidden=true;
     if(!inPlace){mode(false);render();}else renderDate();tell('');
-    if(pendingReload&&!drafts.size&&$('cover').hidden)location.reload();return true;
+    if(pendingReload&&!privacyHeld&&!markdownEditing&&!drafts.size&&$('cover').hidden)location.reload();return true;
   }catch(error){tell(error.message);return false;}
   finally{
     clearTimeout(quietProgress);busy=false;quietSaving=false;
@@ -525,7 +526,7 @@ if('serviceWorker'in navigator){
   let refreshing=false;const controlledOnLoad=!!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
     if(!controlledOnLoad)return;
-    if(markdownEditing||editing||drafts.size||busy||!$('loginForm').hidden||$('passwordDialog').open||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
+    if(privacyHeld||markdownEditing||editing||drafts.size||busy||!$('loginForm').hidden||$('passwordDialog').open||!getSelection()?.isCollapsed||!$('cover').hidden){pendingReload=true;return;}
     if(!refreshing){refreshing=true;location.reload();}
   });
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(registration=>{
@@ -628,10 +629,13 @@ const idleDuration=2*60*1000;
 let idleTimer,lastActivity=Date.now();
 function armIdle(){
   clearTimeout(idleTimer);
-  if(privacyDisabled())return;
+  if(privacyDisabled()||automaticCoverPaused())return;
   if(!$('cover').hidden)return;
-  idleTimer=setTimeout(()=>setCover(true),Math.max(0,idleDuration-(Date.now()-lastActivity)));
+  idleTimer=setTimeout(automaticCover,Math.max(0,idleDuration-(Date.now()-lastActivity)));
 }
+function automaticCoverPaused(){return editing||markdownEditing||privacyHeld;}
+function automaticCover(){if(automaticCoverPaused()){clearTimeout(idleTimer);return;}setCover(true);}
+function resetPrivacyIdle(){lastActivity=Date.now();armIdle();}
 function setCover(show){
   const cover=$('cover'),main=document.querySelector('main');
   if(show&&privacyDisabled())return;
@@ -644,22 +648,22 @@ function setCover(show){
   cover.hidden=!show;main.inert=show;main.setAttribute('aria-hidden',String(show));document.body.classList.toggle('covered',show);
   document.title=show?'The Evening Times':'word 2 myself';getSelection()?.removeAllRanges();
   if(show){positionReader();clearTimeout(idleTimer);}
-  else{lastActivity=Date.now();armIdle();window.scrollTo(0,savedScroll);if(pendingReload&&!editing&&!drafts.size&&!busy)location.reload();}
+  else{lastActivity=Date.now();armIdle();window.scrollTo(0,savedScroll);if(pendingReload&&!privacyHeld&&!markdownEditing&&!editing&&!drafts.size&&!busy)location.reload();}
 }
 function toggleCover(){
   if(Date.now()-lastToggle<400)return;
   lastToggle=Date.now();setCover($('cover').hidden);
 }
 function noteActivity(event){
-  if(privacyDisabled())return;
+  if(privacyDisabled()||automaticCoverPaused())return;
   if(!$('cover').hidden)return;
-  if(Date.now()-lastActivity>=idleDuration){setCover(true);event?.stopImmediatePropagation();return;}
+  if(Date.now()-lastActivity>=idleDuration){automaticCover();event?.stopImmediatePropagation();return;}
   lastActivity=Date.now();armIdle();
 }
 for(const name of ['pointerdown','keydown','input','wheel','touchstart','scroll'])document.addEventListener(name,noteActivity,{capture:true,passive:true});
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')setCover(true);});
-window.addEventListener('pagehide',()=>setCover(true));
-window.addEventListener('pageshow',()=>setCover(true));
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')automaticCover();});
+window.addEventListener('pagehide',automaticCover);
+window.addEventListener('pageshow',automaticCover);
 function tapTarget(target){
   if(privacyDisabled())return false;
   if(target.closest('#cover'))return true;
@@ -696,7 +700,7 @@ $('date').onclick=async()=>{
   try{
     const email=session.email;
     await api.signOut(auth);unsubscribe?.();unsubscribe=null;
-    session=null;key=null;ref=null;revision=null;latest=null;received=false;connected=false;
+    privacyHeld=false;session=null;key=null;ref=null;revision=null;latest=null;received=false;connected=false;
     drafts.clear();book=emptyBook();pageIndex=0;doc=book.pages[0];
     clearTimeout(draftTimer);await draftQueue;localStorage.removeItem(storageKey);await cachedPayload('delete');await cachedPayload('delete',undefined,'drafts');await cachedPayload('delete',undefined,'behavior');conflict=false;$('conflictActions').hidden=true;
     $('title').value='';$('editor').replaceChildren();$('password').value='';
@@ -716,12 +720,13 @@ document.addEventListener('touchmove',event=>{
 
 $('clearTitle').onclick=()=>{if(!canEdit(pageIndex))return;$('title').value='';rememberCurrentDraft();scheduleDraftCache();};
 
-document.addEventListener('selectionchange',()=>{if(pendingReload&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&!$('passwordDialog').open&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
+document.addEventListener('selectionchange',()=>{if(pendingReload&&!privacyHeld&&!markdownEditing&&!editing&&!drafts.size&&!busy&&$('loginForm').hidden&&!$('passwordDialog').open&&getSelection()?.isCollapsed&&$('cover').hidden)location.reload();});
 
 $('addTodo').addEventListener('click',()=>{rememberCurrentDraft();scheduleDraftCache();});
 $('editor').addEventListener('keydown',event=>{if(['Enter','Backspace'].includes(event.key))queueMicrotask(()=>{rememberCurrentDraft();scheduleDraftCache();});});
 
 $('accountSettings').onclick=()=>{
+  if(Date.now()<suppressVersionClickUntil)return;
   if(!session?.key||!auth?.currentUser){tell('请先登录。');return;}
   if(busy||isAgent())return;
   $('passwordChangeForm').reset();$('currentPasswordField').hidden=true;$('currentPassword').required=false;$('passwordChangeNotice').textContent='';$('passwordDialog').showModal();
@@ -824,11 +829,13 @@ function applyAccess(){
   $('markdownButton').hidden=editing||markdownEditing||!session?.key;
   $('behaviorStart').hidden=isAgent();$('behaviorMore').hidden=isAgent();
   $('accountSettings').disabled=isAgent()||!session?.key;
-  $('accountSettings').title=isAgent()?'AI 模式 · 退出后可重新选择':'点击修改密码';
+  $('accountSettings').title=isAgent()?'AI 模式 · 退出后可重新选择':editing||markdownEditing?'编辑时已暂停自动遮挡；单击修改密码':privacyHeld?'自动遮挡已暂停；长按恢复，单击修改密码':'长按暂停自动遮挡；单击修改密码';
+  $('accountSettings').dataset.privacyHeld=String(privacyHeld);
+  $('accountSettings').setAttribute('aria-pressed',String(privacyHeld));
   $('reading').querySelectorAll('input[type=checkbox]').forEach(box=>box.disabled=!allowed||isAgent());
 }
 function markdownDirty(){return markdownEditing&&($('markdownText').value!==markdownInitial.markdown||$('markdownTitle').value!==markdownInitial.title);}
-function closeMarkdown(){markdownEditing=false;$('markdownText').value='';$('markdownTitle').value='';markdownBase=undefined;markdownPriorDraft=undefined;$('markdownPanel').hidden=true;$('page').hidden=!session?.key;applyAccess();}
+function closeMarkdown(){markdownEditing=false;$('markdownText').value='';$('markdownTitle').value='';markdownBase=undefined;markdownPriorDraft=undefined;$('markdownPanel').hidden=true;$('page').hidden=!session?.key;applyAccess();resetPrivacyIdle();}
 $('markdownButton').onclick=()=>{
   if(busy||editing||markdownEditing)return;
   markdownIndex=pageIndex;markdownBase=doc;markdownEditing=true;
@@ -837,7 +844,7 @@ $('markdownButton').onclick=()=>{
   $('markdownTitle').value=markdownInitial.title;$('markdownText').value=markdownInitial.markdown;
   const allowed=canEdit(pageIndex);$('markdownTitle').readOnly=!allowed;$('markdownText').readOnly=!allowed;$('markdownSave').hidden=!allowed;
   $('markdownHint').textContent=allowed?'Markdown · 保存后替换当前页；原有富文本可保留为 HTML。':'只读 · AI 只能修改 Agent 页。';
-  $('markdownNotice').textContent='';$('markdownReload').hidden=true;$('page').hidden=true;$('markdownPanel').hidden=false;applyAccess();
+  $('markdownNotice').textContent='';$('markdownReload').hidden=true;$('page').hidden=true;$('markdownPanel').hidden=false;applyAccess();resetPrivacyIdle();
 };
 $('markdownCancel').onclick=()=>{if(markdownDirty()&&!confirm('放弃尚未保存的 Markdown 修改？'))return;if(markdownPriorDraft)drafts.set(markdownIndex,markdownPriorDraft);else drafts.delete(markdownIndex);flushDraftCache();closeMarkdown();renderTabs();};
 for(const id of ['markdownText','markdownTitle'])$(id).addEventListener('input',()=>{rememberCurrentDraft();scheduleDraftCache();});
@@ -902,3 +909,25 @@ for(const [id,delta] of [['readingSmaller',-1],['readingLarger',1]])$(id).onclic
   try{localStorage.setItem('one-page:reading-size',String(next));}catch{}
   applyReadingSize();
 };
+
+// A short click keeps password settings; a deliberate hold toggles the temporary privacy pause.
+
+function cancelVersionPress(){clearTimeout(versionHoldTimer);versionPress=null;}
+function canHoldVersion(){return !!session?.key&&!isAgent()&&!editing&&!markdownEditing&&!busy&&!$('passwordDialog').open&&$('loginForm').hidden&&$('cover').hidden;}
+function beginVersionPress(x,y,pointer){
+  cancelVersionPress();versionPress={x,y,pointer,at:Date.now(),fired:false};
+  if(!canHoldVersion())return;
+  versionHoldTimer=setTimeout(()=>{
+    if(!versionPress||!canHoldVersion())return;
+    versionPress.fired=true;privacyHeld=!privacyHeld;suppressVersionClickUntil=Date.now()+1200;applyAccess();resetPrivacyIdle();
+  },650);
+}
+$('accountSettings').addEventListener('pointerdown',event=>{if(event.button===0)beginVersionPress(event.clientX,event.clientY,event.pointerId);});
+$('accountSettings').addEventListener('pointermove',event=>{if(versionPress&&Math.hypot(event.clientX-versionPress.x,event.clientY-versionPress.y)>12)cancelVersionPress();});
+$('accountSettings').addEventListener('pointerup',()=>{if(versionPress&&(versionPress.fired||Date.now()-versionPress.at>=650))suppressVersionClickUntil=Date.now()+800;cancelVersionPress();});
+for(const event of ['pointercancel','pointerleave'])$('accountSettings').addEventListener(event,cancelVersionPress);
+$('accountSettings').addEventListener('contextmenu',event=>event.preventDefault());
+$('accountSettings').addEventListener('keydown',event=>{if(event.key===' '&&!event.repeat)beginVersionPress(0,0,'keyboard');});
+$('accountSettings').addEventListener('keyup',event=>{if(event.key===' '){if(versionPress&&(versionPress.fired||Date.now()-versionPress.at>=650)){event.preventDefault();suppressVersionClickUntil=Date.now()+800;}cancelVersionPress();}});
+addEventListener('blur',cancelVersionPress);
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')cancelVersionPress();});
