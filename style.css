@@ -45,3 +45,5 @@ body.behavior-open #notice{display:none}
 #accountSettings[data-privacy-held="true"]{color:#80b8ef}#accountSettings{-webkit-touch-callout:none;touch-action:manipulation}
 #accountSettings{color:#666}
 #accountSettings{position:relative;top:auto;right:auto}#accountSettings::before{content:"";position:absolute;inset:-8px -5px}
+
+#readingSize{position:fixed;top:max(12px,env(safe-area-inset-top));right:max(16px,env(safe-area-inset-right));z-index:30;display:inline-flex;align-items:center;gap:18px;padding:4px;background:#000;border-radius:4px}#readingSize button{width:40px;height:40px;padding:0;font-size:20px;line-height:40px;touch-action:manipulation}@media(max-width:1024px){.meta-actions:has(#readingSize:not([hidden])){padding-right:110px}}

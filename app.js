@@ -904,11 +904,50 @@ function applyReadingSize(){
   $('readingSmaller').disabled=scale===readingSteps[0];$('readingLarger').disabled=scale===readingSteps.at(-1);
   $('readingSize').title='阅读字号 '+Math.round(scale*100)+'%';
 }
-for(const [id,delta] of [['readingSmaller',-1],['readingLarger',1]])$(id).onclick=()=>{
+// Anchor a visible character, rather than a paragraph or a percentage of the document.
+let readingAnchorFrame,readingAnchorStyle;
+function captureReadingAnchor(){
+  if(window.scrollY<=0)return null;
+  const root=$('reading'),walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);let node;
+  while(node=walker.nextNode()){
+    if(!node.textContent.trim())continue;
+    const range=document.createRange();range.selectNodeContents(node);
+    if(![...range.getClientRects()].some(rect=>rect.bottom>1&&rect.top<innerHeight&&rect.width>0))continue;
+    const character=offset=>{range.setStart(node,offset);range.setEnd(node,offset+1);return range.getBoundingClientRect();};
+    let low=0,high=node.length;
+    while(low<high){const mid=Math.floor((low+high)/2);if(character(mid).bottom>1)high=mid;else low=mid+1;}
+    for(let offset=low;offset<node.length;offset++){
+      const rect=character(offset);
+      if(rect.top>=innerHeight)break;
+      if(rect.bottom>1&&rect.width>0&&node.textContent[offset].trim())return {range:range.cloneRange(),node,top:rect.top};
+    }
+  }
+  const image=[...root.querySelectorAll('img')].find(node=>{const rect=node.getBoundingClientRect();return rect.bottom>0&&rect.top<innerHeight;});
+  return image?{node:image,top:image.getBoundingClientRect().top}:null;
+}
+function resizeReading(delta){
   const index=readingSteps.indexOf(readingScale()),next=readingSteps[Math.max(0,Math.min(readingSteps.length-1,index+delta))];
+  if(next===readingScale())return;
+  const anchor=captureReadingAnchor(),root=document.documentElement,owner=doc,ownerPage=pageIndex;
+  cancelAnimationFrame(readingAnchorFrame);
+  if(!readingAnchorStyle)readingAnchorStyle={value:root.style.getPropertyValue('overflow-anchor'),priority:root.style.getPropertyPriority('overflow-anchor')};
+  root.style.setProperty('overflow-anchor','none');
+  const align=()=>{
+    if(owner!==doc||ownerPage!==pageIndex||editing||markdownEditing||!$('cover').hidden||document.body.classList.contains('behavior-open')||(anchor&&!$('reading').contains(anchor.node)))return;
+    if(anchor){const rect=(anchor.range||anchor.node).getBoundingClientRect();window.scrollTo({top:window.scrollY+rect.top-anchor.top,behavior:'instant'});}
+    else if(window.scrollY<=0)window.scrollTo({top:0,behavior:'instant'});
+  };
   try{localStorage.setItem('one-page:reading-size',String(next));}catch{}
-  applyReadingSize();
-};
+  applyReadingSize();align();
+  readingAnchorFrame=requestAnimationFrame(()=>{
+    align();const previous=readingAnchorStyle;readingAnchorStyle=null;
+    if(previous.value)root.style.setProperty('overflow-anchor',previous.value,previous.priority);else root.style.removeProperty('overflow-anchor');
+  });
+}
+for(const [id,delta] of [['readingSmaller',-1],['readingLarger',1]]){
+  $(id).onmousedown=event=>event.preventDefault();
+  $(id).onclick=()=>resizeReading(delta);
+}
 
 // A short click keeps password settings; a deliberate hold toggles the temporary privacy pause.
 
